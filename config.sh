@@ -190,6 +190,7 @@ space() {
 }
 
 logout() {
+    # 1. Sync and push all workspace repositories
     if [ -d "$WORKSPACE_GOINFRE" ]; then
         for repo in "$WORKSPACE_GOINFRE"/*(/) ; do
             if [ -d "$repo/.git" ]; then
@@ -203,15 +204,37 @@ logout() {
         done
     fi
 
+    # 2. Sync and push changes in the 42-config repository
+    local config_dir="/goinfre/$USER/42-config"
+    if [ -d "$config_dir/.git" ]; then
+        cd "$config_dir" || return 1
+        if [[ -n $(git status -s) ]] || [[ -n $(git cherry -v 2>/dev/null) ]]; then
+                    git add .
+            git commit -m "Autosync 42-config on logout: $(date)"
+            git push
+        fi
+    fi
+
+    # 3. Restore heavy files back to $HOME from goinfre before wiping
+    local relocated_dir="/goinfre/$USER/realocated"
     local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet")
+    
     for dir in "${heavy_dirs[@]}"; do
-        if [ -L "$HOME/$dir" ]; then
-            rm "$HOME/$dir"
+        local target_home="$HOME/$dir"
+        local target_goinfre="$relocated_dir/$dir"
+
+        # If it's currently a symlink, remove the link and move the real data back
+        if [ -L "$target_home" ]; then
+            rm "$target_home"
+            if [ -d "$target_goinfre" ]; then
+                mv "$target_goinfre" "$target_home"
+            fi
         fi
     done
 
+    # 4. Wipe temporary goinfre runtime storage
     rm -rf "$TOOLS"
     rm -rf "$CONFIG"
     rm -rf "$WORKSPACE_GOINFRE"
-    rm -rf "/goinfre/$USER/realocated"
+    rm -rf "$relocated_dir"
 }
