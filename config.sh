@@ -204,16 +204,16 @@ logout() {
         done
     fi
 
-    # 2. Sync and push changes in the 42-config repository
-    local config_dir="/goinfre/$USER/42-config"
-    if [ -d "$config_dir/.git" ]; then
-        cd "$config_dir" || return 1
-        if [[ -n $(git status -s) ]] || [[ -n $(git cherry -v 2>/dev/null) ]]; then
-            git add .
-            git commit -m "Autosync 42-config on logout: $(date)"
-            git push
-        fi
-    fi
+    # # 2. Sync and push changes in the 42-config repository
+    # local config_dir="/goinfre/$USER/42-config"
+    # if [ -d "$config_dir/.git" ]; then
+    #     cd "$config_dir" || return 1
+    #     if [[ -n $(git status -s) ]] || [[ -n $(git cherry -v 2>/dev/null) ]]; then
+    #         git add .
+    #         git commit -m "Autosync 42-config on logout: $(date)"
+    #         git push
+    #     fi
+    # fi
 
     # 3. Restore heavy files back to $HOME from goinfre before wiping
     local relocated_dir="/goinfre/$USER/realocated"
