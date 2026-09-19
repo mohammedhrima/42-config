@@ -36,6 +36,17 @@ UV_COMP="$TOOLS/uv-installation.tar.gz"
 UV_PATH="$TOOLS/uv"
 UV_BIN="$TOOLS/uv"
 
+gsettings set org.gnome.shell.extensions.dash-to-dock dash-max-icon-size 32
+gsettings set org.gnome.desktop.interface text-scaling-factor 1.0
+gsettings set org.gnome.desktop.interface scaling-factor 0
+
+local target_res="2560x1440"
+local output_name="eDP"
+
+if xrandr --current | grep -qw "$target_res"; then
+    echo "Found $target_res, applying resolution..."
+    xrandr --output "$output_name" --mode "$target_res"
+fi
 
 _install() {
     local url="$1"
@@ -71,6 +82,7 @@ rehash
 
 update() {
     source "$CONFIG/config.sh"
+    source "$HOME/.zshrc"
 }
 
 PAPERDESK="$TOOLS/paperdesk"
