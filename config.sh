@@ -190,9 +190,9 @@ space() {
 }
 
 logout() {
-    # 1. Sync and push all workspace repositories
+    # 1. Sync and push all workspace repositories (with null-glob modifier to prevent errors if empty)
     if [ -d "$WORKSPACE_GOINFRE" ]; then
-        for repo in "$WORKSPACE_GOINFRE"/*(/) ; do
+        for repo in "$WORKSPACE_GOINFRE"/*(/N) ; do
             if [ -d "$repo/.git" ]; then
                 cd "$repo" || continue
                 if [[ -n $(git status -s) ]] || [[ -n $(git cherry -v 2>/dev/null) ]]; then
@@ -209,7 +209,7 @@ logout() {
     if [ -d "$config_dir/.git" ]; then
         cd "$config_dir" || return 1
         if [[ -n $(git status -s) ]] || [[ -n $(git cherry -v 2>/dev/null) ]]; then
-                    git add .
+            git add .
             git commit -m "Autosync 42-config on logout: $(date)"
             git push
         fi
@@ -223,7 +223,6 @@ logout() {
         local target_home="$HOME/$dir"
         local target_goinfre="$relocated_dir/$dir"
 
-        # If it's currently a symlink, remove the link and move the real data back
         if [ -L "$target_home" ]; then
             rm "$target_home"
             if [ -d "$target_goinfre" ]; then
