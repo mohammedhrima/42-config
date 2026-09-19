@@ -160,17 +160,31 @@ repos() {
 }
 
 space() {
+    local relocated_dir="/goinfre/$USER/realocated"
+    mkdir -p "$relocated_dir"
+
     local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet")
 
     for dir in "${heavy_dirs[@]}"; do
         local target_home="$HOME/$dir"
-        local target_goinfre="$REALOCATED/$dir"
+        local target_goinfre="$relocated_dir/$dir"
 
+        # If it's a real directory in home (and not already a symlink)
         if [ -d "$target_home" ] && [ ! -L "$target_home" ]; then
             echo "Moving $dir to goinfre..."
-            mv "$target_home" "$target_goinfre"
+            # If target in goinfre already exists, merge contents or remove conflict
+            if [ -d "$target_goinfre" ]; then
+                cp -rn "$target_home/"* "$target_goinfre/" 2>/dev/null
+                rm -rf "$target_home"
+            else
+                mv "$target_home" "$target_goinfre"
+            fi
             ln -s "$target_goinfre" "$target_home"
             echo "Symlinked $dir -> $target_goinfre"
+        elif [ ! -e "$target_home" ]; then
+            # If it doesn't exist anywhere yet, create it in goinfre and symlink
+            mkdir -p "$target_goinfre"
+            ln -s "$target_goinfre" "$target_home"
         fi
     done
 }
