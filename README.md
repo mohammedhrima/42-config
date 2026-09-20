@@ -24,6 +24,8 @@ It uses `/goinfre/$USER` for persistent storage and provides automatic tool inst
 * **Repository tracking** using `~/repos.toml`.
 * **Automatic local branch creation** for remote branches.
 * **Disk-space optimization** with `space`.
+* **Private per-user settings** in `~/.42-custom.sh`, kept out of this repository.
+* **Optional private `~/.claude`** synchronization with `memo`.
 * **Automatic Git synchronization** with `logout`.
 * **Session cleanup** after logout.
 * **Path protection** to ensure the configuration is running from the expected location.
@@ -122,11 +124,12 @@ The environment uses `/goinfre/$USER` as its persistent storage area:
 └── workspace/
 ```
 
-Your home directory keeps the repository tracking file:
+Your home directory keeps the files that must survive the session cleanup:
 
 ```text
 $HOME/
-└── repos.toml
+├── repos.toml        tracked repositories
+└── .42-custom.sh     private settings, mode 600
 ```
 
 ---
@@ -399,6 +402,69 @@ The file is stored in `$HOME` rather than `/goinfre` so that it survives the ses
 
 ---
 
+# Private settings
+
+This repository is public, and `logout` deletes everything under `/goinfre/$USER`, including this repository. A file placed next to `config.sh` and excluded with `.gitignore` would therefore be gone on the next session.
+
+Anything private or machine-specific belongs in:
+
+```text
+~/.42-custom.sh
+```
+
+It is created with mode `600` the first time `config.sh` runs, containing only comments, and is sourced on every load. An empty one changes nothing, so the configuration behaves identically for anyone who never edits it.
+
+Recognised settings:
+
+```sh
+# Private repository holding your ~/.claude directory.
+# Leave it unset and `memo` does nothing.
+CLAUDE_MEMO_URL="git@github.com:<you>/<your-private-repo>.git"
+```
+
+---
+
+# `memo`
+
+`memo` relocates `~/.claude` to `/goinfre/$USER/realocated/.claude` like the directories handled by `space`, except that it is a clone of a private repository rather than an empty directory. Your Claude Code conversations, plans and skills then follow you from one workstation to the next.
+
+It does nothing while `CLAUDE_MEMO_URL` is unset.
+
+Usage:
+
+```bash
+memo
+```
+
+`space` calls it, so `init` sets it up along with everything else.
+
+On the first run the existing `~/.claude` is merged into the clone and then kept as `~/.claude.bak.<timestamp>`. Nothing is deleted. Files the repository already carries win, so settings pushed from another workstation are preserved; the local login token is the exception, since it is the one that currently works.
+
+`memo` refuses to run while Claude Code is open, because it moves the directory Claude reads its state from. If the clone fails, `~/.claude` is left exactly as it was.
+
+## `memo_save`
+
+```bash
+memo_save
+```
+
+Commits the clone, rebases onto the remote and pushes. `logout` runs it.
+
+Which files are tracked is decided by the `.gitignore` **inside your private repository**, not by this one. The recommended form denies everything and whitelists what is worth keeping:
+
+```text
+/*
+!/.gitignore
+!/settings.json
+!/projects/
+!/plans/
+!/skills/
+```
+
+This keeps caches, plugins, IDE lock files and per-session state out of the history. `memo_save` verifies those rules before every push and refuses to push if they are missing, so a lost `.gitignore` cannot publish session state.
+
+---
+
 # Disk Space Management
 
 ## `space`
@@ -459,6 +525,8 @@ $HOME/.npm
 This allows applications to continue using their normal `$HOME` paths while the actual data is stored in `/goinfre`.
 
 The command only moves directories that exist and are not already symbolic links.
+
+Finally, `space` calls [`memo`](#memo), which relocates `~/.claude` the same way when `CLAUDE_MEMO_URL` is configured and does nothing otherwise.
 
 ---
 
@@ -533,9 +601,15 @@ This allows your work to be pushed before the local workspace is removed.
 
 ---
 
-## 2. Remove relocated-directory symlinks
+## 2. Push the private `~/.claude` repository
 
-If `space` was previously used, `logout` removes the symbolic links from `$HOME`:
+`logout` then runs [`memo_save`](#memo_save), which commits and pushes the `.claude` clone. This step does nothing unless `CLAUDE_MEMO_URL` is set.
+
+---
+
+## 3. Restore relocated directories to `$HOME`
+
+If `space` was previously used, `logout` removes each symbolic link from `$HOME` and moves the real directory back out of `/goinfre`:
 
 ```text
 $HOME/.cache
@@ -544,13 +618,16 @@ $HOME/.vscode
 $HOME/.vscode-shared
 $HOME/.copilot
 $HOME/.dotnet
+$HOME/.claude
 ```
 
-Only symbolic links are removed.
+Only symbolic links are replaced this way.
+
+Because `.claude` is restored rather than wiped, a failed push in step 2 costs nothing: the clone is waiting in `$HOME` on the next session, and `memo` moves it back to `/goinfre` instead of cloning again. The login token travels with it, so there is no login to redo.
 
 ---
 
-## 3. Remove temporary environment
+## 4. Remove temporary environment
 
 Finally, `logout` removes:
 

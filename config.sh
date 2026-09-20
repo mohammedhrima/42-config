@@ -21,6 +21,34 @@ REALOCATED="/goinfre/$USER/realocated"
 mkdir -p $TOOLS
 mkdir -p $REALOCATED
 
+# /goinfre is world-traversable and every workstation is shared, so keep the
+# directories that hold personal data readable by their owner only. mkdir -p
+# does not change the mode of a directory that already exists.
+chmod 700 "$TOOLS" "$REALOCATED" 2>/dev/null
+
+# Per-user private settings: machine-specific values that must not be published
+# here. Kept in $HOME because logout wipes /goinfre, so anything stored next to
+# this script is gone on the next session, exactly like ~/repos.toml.
+CUSTOM="$HOME/.42-custom.sh"
+
+if [ ! -f "$CUSTOM" ]; then
+    cat > "$CUSTOM" <<'CUSTOM_EOF'
+#!/bin/zsh
+# Private settings for 42-config. Not tracked by any repository.
+
+# Private repository holding your ~/.claude directory (conversations, plans,
+# skills). While this stays unset, `memo` does nothing and ~/.claude is left
+# alone, so the rest of the configuration behaves normally.
+# CLAUDE_MEMO_URL="git@github.com:<you>/<your-private-repo>.git"
+CUSTOM_EOF
+    chmod 600 "$CUSTOM"
+    echo "Created $CUSTOM"
+fi
+
+source "$CUSTOM"
+
+CLAUDE_DIR="$REALOCATED/.claude"
+
 VSCODE_URL="https://update.code.visualstudio.com/latest/linux-x64/stable"
 VSCODE_COMP="$TOOLS/code-installation.tar.gz"
 VSCODE_PATH="$TOOLS/code"
@@ -102,6 +130,8 @@ if [ ! -d "$WORKSPACE_GOINFRE" ]; then
     echo "Created directory at $WORKSPACE_GOINFRE"
     mkdir -p "$WORKSPACE_GOINFRE"
 fi
+
+chmod 700 "$WORKSPACE_GOINFRE" 2>/dev/null
 
 if [ ! -L "$WORKSPACE_DESKTOP" ] && [ ! -d "$WORKSPACE_DESKTOP" ]; then
     echo "Created symlink on Desktop pointing to $WORKSPACE_GOINFRE"
@@ -199,6 +229,119 @@ space() {
             ln -s "$target_goinfre" "$target_home"
         fi
     done
+
+    memo
+}
+
+# Relocate $HOME/.claude to goinfre like the directories above, except that it
+# is a clone of a private repository instead of an empty directory: the
+# conversations, plans and skills follow you from one workstation to the next.
+#
+# Does nothing while CLAUDE_MEMO_URL is unset, which is the case for anyone who
+# has not put their own repository in ~/.42-custom.sh.
+memo() {
+    if [ -z "$CLAUDE_MEMO_URL" ]; then
+        return 0
+    fi
+
+    local home_claude="$HOME/.claude"
+
+    # A session that ended without logout leaves a link into a wiped goinfre.
+    if [ -L "$home_claude" ] && [ ! -e "$home_claude" ]; then
+        rm -f "$home_claude"
+    fi
+
+    # Already linked: only refresh.
+    if [ -L "$home_claude" ] && [ "$(readlink -f "$home_claude")" = "$CLAUDE_DIR" ]; then
+        git -C "$CLAUDE_DIR" pull --rebase --autostash 2>/dev/null
+        return 0
+    fi
+
+    # Everything below moves the directory Claude Code reads its configuration
+    # and session state from, which a running instance would not survive.
+    if pgrep -u "$USER" -x claude > /dev/null 2>&1; then
+        echo "memo: Claude Code is running, close it and run 'memo' again"
+        return 1
+    fi
+
+    if [ ! -d "$CLAUDE_DIR/.git" ]; then
+        if [ -d "$home_claude/.git" ] && [ ! -L "$home_claude" ]; then
+            # logout put the clone back in $HOME at the end of the last session.
+            echo "Moving .claude to goinfre..."
+            mv "$home_claude" "$CLAUDE_DIR" || return 1
+        else
+            [ -e "$CLAUDE_DIR" ] && mv "$CLAUDE_DIR" "$CLAUDE_DIR.broken.$(date +%s)"
+            echo "Cloning .claude from $CLAUDE_MEMO_URL..."
+            git clone "$CLAUDE_MEMO_URL" "$CLAUDE_DIR" || {
+                echo "memo: clone failed, $home_claude left untouched"
+                rm -rf "$CLAUDE_DIR"
+                return 1
+            }
+        fi
+    fi
+
+    # First run on a machine that already had a real ~/.claude: fold it into the
+    # clone. -n keeps whatever the repository already carries, so settings and
+    # conversations pushed from another workstation win. The login token is the
+    # exception: the local one is the live one.
+    if [ -d "$home_claude" ] && [ ! -L "$home_claude" ]; then
+        echo "Merging $home_claude into the clone..."
+        cp -a -n "$home_claude/." "$CLAUDE_DIR/" 2>/dev/null
+        [ -f "$home_claude/.credentials.json" ] && \
+            cp -a -f "$home_claude/.credentials.json" "$CLAUDE_DIR/.credentials.json"
+        mv "$home_claude" "$home_claude.bak.$(date +%Y%m%d%H%M%S)" || return 1
+    fi
+
+    # After the copy, never before: cp -a carries the mode of the directory it
+    # copied from, which would put the clone back to 755.
+    chmod 700 "$CLAUDE_DIR"
+
+    ln -s "$CLAUDE_DIR" "$home_claude"
+    echo "Linked $home_claude -> $CLAUDE_DIR"
+
+    # Best effort: the link is what matters, a failed refresh is not a failure.
+    git -C "$CLAUDE_DIR" pull --rebase --autostash 2>/dev/null
+    return 0
+}
+
+# Commit and push the .claude clone. Called by logout, and safe to run by hand.
+memo_save() {
+    if [ -z "$CLAUDE_MEMO_URL" ] || [ ! -d "$CLAUDE_DIR/.git" ]; then
+        return 0
+    fi
+
+    # The repository's .gitignore is what keeps per-session state and IDE lock
+    # files out of the history. If it is missing or was replaced, `git add -A`
+    # below would publish them, so stop instead.
+    local leak
+    for leak in sessions ide backups shell-snapshots session-env cache plugins; do
+        if ! git -C "$CLAUDE_DIR" check-ignore -q "$leak"; then
+            echo "memo_save: '$leak' is not ignored by $CLAUDE_DIR/.gitignore, refusing to push"
+            return 1
+        fi
+    done
+
+    git -C "$CLAUDE_DIR" add -A
+    if [ -n "$(git -C "$CLAUDE_DIR" status --porcelain)" ]; then
+        git -C "$CLAUDE_DIR" commit -q -m "memo: $(date '+%Y-%m-%d %H:%M:%S') ($(hostname -s))"
+    fi
+
+    git -C "$CLAUDE_DIR" pull --rebase --autostash || {
+        echo "memo_save: rebase failed, fix it by hand in $CLAUDE_DIR"
+        return 1
+    }
+    git -C "$CLAUDE_DIR" push || {
+        echo "memo_save: push failed, $CLAUDE_DIR is kept"
+        return 1
+    }
+}
+
+mouse() {   
+    while true; do
+        xdotool mousemove_relative -- 1 0
+        # Sleep for 5 minutes (5 * 60 = 300 seconds)
+        sleep 300
+    done
 }
 
 logout() {
@@ -227,10 +370,16 @@ logout() {
     #     fi
     # fi
 
-    # 3. Restore heavy files back to $HOME from goinfre before wiping
+    # 3. Push the .claude clone. No-op unless CLAUDE_MEMO_URL is set.
+    memo_save
+
+    # 4. Restore heavy files back to $HOME from goinfre before wiping.
+    #    .claude is restored like the rest: if the push above failed, the clone
+    #    is still in $HOME on the next session instead of being wiped, and the
+    #    login token travels with it so there is no login to redo.
     local relocated_dir="/goinfre/$USER/realocated"
-    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet")
-    
+    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet" ".claude")
+
     for dir in "${heavy_dirs[@]}"; do
         local target_home="$HOME/$dir"
         local target_goinfre="$relocated_dir/$dir"
@@ -243,7 +392,7 @@ logout() {
         fi
     done
 
-    # 4. Wipe temporary goinfre runtime storage
+    # 5. Wipe temporary goinfre runtime storage
     rm -rf "$TOOLS"
     rm -rf "$CONFIG"
     rm -rf "$WORKSPACE_GOINFRE"

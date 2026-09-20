@@ -1,0 +1,8 @@
+# Per-user private settings never belong in this public repository.
+# The real file lives in $HOME (see README, "Private settings"); these patterns
+# only exist so a stray copy inside the repository cannot be committed by the
+# `git add .` that logout runs.
+.42-custom.sh
+custom.sh
+*.local.sh
+.env
