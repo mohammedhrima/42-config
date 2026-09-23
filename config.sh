@@ -97,12 +97,21 @@ _install() {
     else
         # echo "$install_path already exists"
     fi
+
 }
 
-# 1. Install tools first
-_install "$VSCODE_URL" "$VSCODE_COMP" "$VSCODE_PATH" "$VSCODE_BIN" && \
-_install "$NODE_URL" "$NODE_COMP" "$NODE_PATH" "$NODE_BIN" && \
-_install "$UV_URL" "$UV_COMP" "$UV_PATH" "$UV_BIN"
+install() {
+    # 1. Install tools first
+    _install "$VSCODE_URL" "$VSCODE_COMP" "$VSCODE_PATH" "$VSCODE_BIN" && \
+    _install "$NODE_URL" "$NODE_COMP" "$NODE_PATH" "$NODE_BIN" && \
+    _install "$UV_URL" "$UV_COMP" "$UV_PATH" "$UV_BIN" && \
+    PAPERDESK="$TOOLS/paperdesk"
+    if [ ! -d "$PAPERDESK" ]; then
+        echo "Installing $PAPERDESK..."
+        git clone git@github.com:mohammedhrima/paperdesk.git $PAPERDESK && \
+        make install -C $PAPERDESK
+    fi
+}
 
 # 2. Put newly installed tool bins at the very front of PATH immediately
 export PATH="$NODE_BIN:$VSCODE_BIN:$UV_PATH:$PATH"
@@ -113,12 +122,7 @@ update() {
     source "$HOME/.zshrc"
 }
 
-PAPERDESK="$TOOLS/paperdesk"
-if [ ! -d "$PAPERDESK" ]; then
-    echo "Installing $PAPERDESK..."
-    git clone git@github.com:mohammedhrima/paperdesk.git $PAPERDESK && \
-    make install -C $PAPERDESK
-fi
+
 
 alias clean="clear"
 
