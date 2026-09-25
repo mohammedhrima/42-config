@@ -64,6 +64,11 @@ UV_COMP="$TOOLS/uv-installation.tar.gz"
 UV_PATH="$TOOLS/uv"
 UV_BIN="$TOOLS/uv"
 
+FLUTTER_URL="https://storage.googleapis.com/flutter_infra_release/releases/$(curl -s https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json | grep -o 'stable/linux/flutter_linux_[0-9.]*-stable\.tar\.xz' | head -n1)"
+FLUTTER_COMP="$TOOLS/flutter-installation.tar.xz"
+FLUTTER_PATH="$TOOLS/flutter"
+FLUTTER_BIN="$TOOLS/flutter/bin"
+
 gsettings set org.gnome.shell.extensions.dash-to-dock dash-max-icon-size 32
 gsettings set org.gnome.desktop.interface text-scaling-factor 1.0
 gsettings set org.gnome.desktop.interface scaling-factor 0
@@ -76,45 +81,78 @@ if xrandr --current | grep -qw "$target_res"; then
     xrandr --output "$output_name" --mode "$target_res"
 fi
 
+# Progress output. Every function below reports through these so a long step
+# never looks like a hang.
+_step() { echo ""; echo "==> $*" }
+_info() { echo "    $*" }
+_ok()   { echo "    [ok] $*" }
+_err()  { echo "    [!!] $*" >&2 }
+
 _install() {
     local url="$1"
     local archive="$2"
     local install_path="$3"
     local bin_path="$4"
+    local name="${install_path:t}"
 
-    if [ ! -d "$install_path" ]; then
-        echo "Installing $install_path..."
-
-        curl -fL "$url" -o "$archive" || return 1
-        mkdir -p "$install_path" || return 1
-        tar -xf "$archive" --strip-components=1 -C "$install_path" || {
-            rm -rf "$install_path"
-            rm -f "$archive"
-            return 1
-        }
-
-        rm -f "$archive"
-    else
-        # echo "$install_path already exists"
+    if [ -d "$install_path" ]; then
+        _info "$name already installed ($install_path)"
+        return 0
     fi
 
+    _step "Installing $name"
+    _info "from $url"
+    _info "downloading..."
+
+    curl -fL --progress-bar "$url" -o "$archive" || {
+        _err "$name: download failed"
+        rm -f "$archive"
+        return 1
+    }
+    _ok "downloaded $(du -h "$archive" 2>/dev/null | cut -f1)"
+
+    mkdir -p "$install_path" || return 1
+
+    _info "extracting to $install_path"
+    _info "this can take a few minutes, do not interrupt it"
+    tar -xf "$archive" --strip-components=1 -C "$install_path" || {
+        _err "$name: extract failed"
+        rm -rf "$install_path"
+        rm -f "$archive"
+        return 1
+    }
+
+    rm -f "$archive"
+    _ok "$name ready, $(du -sh "$install_path" 2>/dev/null | cut -f1) in $install_path"
 }
 
 install() {
+    _step "Installing tools into $TOOLS"
     # 1. Install tools first
     _install "$VSCODE_URL" "$VSCODE_COMP" "$VSCODE_PATH" "$VSCODE_BIN" && \
     _install "$NODE_URL" "$NODE_COMP" "$NODE_PATH" "$NODE_BIN" && \
     _install "$UV_URL" "$UV_COMP" "$UV_PATH" "$UV_BIN" && \
+    _install "$FLUTTER_URL" "$FLUTTER_COMP" "$FLUTTER_PATH" "$FLUTTER_BIN"
+
     PAPERDESK="$TOOLS/paperdesk"
     if [ ! -d "$PAPERDESK" ]; then
-        echo "Installing $PAPERDESK..."
+        _step "Installing paperdesk"
         git clone git@github.com:mohammedhrima/paperdesk.git $PAPERDESK && \
-        make install -C $PAPERDESK
+        make install -C $PAPERDESK && _ok "paperdesk ready"
+    else
+        _info "paperdesk already installed"
     fi
+
+    _step "All tools done"
+    _info "PATH now starts with: node, code, uv, flutter"
 }
 
 # 2. Put newly installed tool bins at the very front of PATH immediately
-export PATH="$NODE_BIN:$VSCODE_BIN:$UV_PATH:$PATH"
+export PATH="$NODE_BIN:$VSCODE_BIN:$UV_PATH:$FLUTTER_BIN:$PATH"
+
+# Dart downloads packages to ~/.pub-cache by default and it grows past a GB.
+# $HOME is the small disk, so keep it on goinfre like everything else.
+export PUB_CACHE="$REALOCATED/.pub-cache"
 rehash
 
 update() {
@@ -154,10 +192,15 @@ add() {
     local tracking_file="$HOME/repos.toml"
 
     if [ ! -d "$target_dir" ]; then
-        echo "Cloning all branches from $repo_url into $target_dir..."
-        git clone --no-single-branch "$repo_url" "$target_dir" || return 1
+        _step "Adding $dir_name"
+        _info "cloning all branches from $repo_url ..."
+        git clone --no-single-branch "$repo_url" "$target_dir" || {
+            _err "clone failed"
+            return 1
+        }
+        _ok "cloned into $target_dir"
     else
-        echo "Directory $target_dir already exists."
+        _info "$target_dir already exists"
     fi
 
     if [ ! -f "$tracking_file" ]; then
@@ -166,7 +209,7 @@ add() {
 
     if ! grep -q "^$dir_name =" "$tracking_file" 2>/dev/null; then
         echo "$dir_name = \"$repo_url\"" >> "$tracking_file"
-        echo "Saved configuration to $tracking_file"
+        _ok "recorded in $tracking_file"
     fi
 }
 
@@ -174,9 +217,11 @@ repos() {
     local tracking_file="$HOME/repos.toml"
 
     if [ ! -f "$tracking_file" ]; then
-        echo "No tracking file found at $tracking_file"
+        _err "no tracking file at $tracking_file"
         return 1
     fi
+
+    _step "Cloning repositories listed in $tracking_file"
 
     while IFS='=' read -r key val; do
         local dir_name=$(echo "$key" | xargs)
@@ -187,8 +232,12 @@ repos() {
         local target_dir="$WORKSPACE_GOINFRE/$dir_name"
 
         if [ ! -d "$target_dir" ]; then
-            echo "Cloning and setting up all local branches for $dir_name..."
-            git clone --no-single-branch "$repo_url" "$target_dir" || continue
+            _info "cloning $dir_name from $repo_url ..."
+            git clone --no-single-branch "$repo_url" "$target_dir" || {
+                _err "$dir_name: clone failed"
+                continue
+            }
+            _info "creating local branches for $dir_name..."
             
             cd "$target_dir" || continue
             for remote in $(git branch -r | grep -v '\->'); do
@@ -199,8 +248,9 @@ repos() {
             done
             git checkout main 2>/dev/null || git checkout master 2>/dev/null
             cd - > /dev/null
+            _ok "$dir_name ready"
         else
-            echo "Directory $target_dir already exists, skipping."
+            _info "$dir_name already present, skipping"
         fi
     done < "$tracking_file"
 }
@@ -208,6 +258,8 @@ repos() {
 space() {
     local relocated_dir="/goinfre/$USER/realocated"
     mkdir -p "$relocated_dir"
+
+    _step "Relocating heavy directories to $relocated_dir"
 
     local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet")
 
@@ -217,7 +269,7 @@ space() {
 
         # If it's a real directory in home (and not already a symlink)
         if [ -d "$target_home" ] && [ ! -L "$target_home" ]; then
-            echo "Moving $dir to goinfre..."
+            _info "moving $dir ($(du -sh "$target_home" 2>/dev/null | cut -f1)) to goinfre..."
             # If target in goinfre already exists, merge contents or remove conflict
             if [ -d "$target_goinfre" ]; then
                 cp -rn "$target_home/"* "$target_goinfre/" 2>/dev/null
@@ -226,11 +278,14 @@ space() {
                 mv "$target_home" "$target_goinfre"
             fi
             ln -s "$target_goinfre" "$target_home"
-            echo "Symlinked $dir -> $target_goinfre"
+            _ok "$dir -> $target_goinfre"
         elif [ ! -e "$target_home" ]; then
             # If it doesn't exist anywhere yet, create it in goinfre and symlink
             mkdir -p "$target_goinfre"
             ln -s "$target_goinfre" "$target_home"
+            _ok "$dir created on goinfre and linked"
+        else
+            _info "$dir already linked"
         fi
     done
 
@@ -248,6 +303,8 @@ memo() {
         return 0
     fi
 
+    _step "Linking ~/.claude to its private repository"
+
     local home_claude="$HOME/.claude"
 
     # A session that ended without logout leaves a link into a wiped goinfre.
@@ -257,27 +314,29 @@ memo() {
 
     # Already linked: only refresh.
     if [ -L "$home_claude" ] && [ "$(readlink -f "$home_claude")" = "$CLAUDE_DIR" ]; then
+        _info "already linked, refreshing..."
         git -C "$CLAUDE_DIR" pull --rebase --autostash 2>/dev/null
+        _ok "up to date"
         return 0
     fi
 
     # Everything below moves the directory Claude Code reads its configuration
     # and session state from, which a running instance would not survive.
     if pgrep -u "$USER" -x claude > /dev/null 2>&1; then
-        echo "memo: Claude Code is running, close it and run 'memo' again"
+        _err "Claude Code is running. Close it, then run 'memo' again"
         return 1
     fi
 
     if [ ! -d "$CLAUDE_DIR/.git" ]; then
         if [ -d "$home_claude/.git" ] && [ ! -L "$home_claude" ]; then
             # logout put the clone back in $HOME at the end of the last session.
-            echo "Moving .claude to goinfre..."
+            _info "found .claude in \$HOME from last session, moving it to goinfre..."
             mv "$home_claude" "$CLAUDE_DIR" || return 1
         else
             [ -e "$CLAUDE_DIR" ] && mv "$CLAUDE_DIR" "$CLAUDE_DIR.broken.$(date +%s)"
-            echo "Cloning .claude from $CLAUDE_MEMO_URL..."
+            _info "cloning from $CLAUDE_MEMO_URL ..."
             git clone "$CLAUDE_MEMO_URL" "$CLAUDE_DIR" || {
-                echo "memo: clone failed, $home_claude left untouched"
+                _err "clone failed, $home_claude left untouched"
                 rm -rf "$CLAUDE_DIR"
                 return 1
             }
@@ -289,7 +348,7 @@ memo() {
     # conversations pushed from another workstation win. The login token is the
     # exception: the local one is the live one.
     if [ -d "$home_claude" ] && [ ! -L "$home_claude" ]; then
-        echo "Merging $home_claude into the clone..."
+        _info "merging your existing $home_claude into the clone..."
         cp -a -n "$home_claude/." "$CLAUDE_DIR/" 2>/dev/null
         [ -f "$home_claude/.credentials.json" ] && \
             cp -a -f "$home_claude/.credentials.json" "$CLAUDE_DIR/.credentials.json"
@@ -301,7 +360,8 @@ memo() {
     chmod 700 "$CLAUDE_DIR"
 
     ln -s "$CLAUDE_DIR" "$home_claude"
-    echo "Linked $home_claude -> $CLAUDE_DIR"
+    _ok "$home_claude -> $CLAUDE_DIR"
+    _info "refreshing from the remote..."
 
     # Best effort: the link is what matters, a failed refresh is not a failure.
     git -C "$CLAUDE_DIR" pull --rebase --autostash 2>/dev/null
@@ -317,27 +377,38 @@ memo_save() {
     # The repository's .gitignore is what keeps per-session state and IDE lock
     # files out of the history. If it is missing or was replaced, `git add -A`
     # below would publish them, so stop instead.
+    _step "Pushing ~/.claude"
+    _info "checking that session state is still ignored..."
+
     local leak
     for leak in sessions ide backups shell-snapshots session-env cache plugins; do
         if ! git -C "$CLAUDE_DIR" check-ignore -q "$leak"; then
-            echo "memo_save: '$leak' is not ignored by $CLAUDE_DIR/.gitignore, refusing to push"
+            _err "'$leak' is not ignored by $CLAUDE_DIR/.gitignore, refusing to push"
             return 1
         fi
     done
 
     git -C "$CLAUDE_DIR" add -A
+    local changed=$(git -C "$CLAUDE_DIR" diff --cached --numstat | wc -l | tr -d ' ')
     if [ -n "$(git -C "$CLAUDE_DIR" status --porcelain)" ]; then
+        _info "committing $changed changed file(s)..."
         git -C "$CLAUDE_DIR" commit -q -m "memo: $(date '+%Y-%m-%d %H:%M:%S') ($(hostname -s))"
+    else
+        _info "nothing new to commit"
     fi
 
+    _info "rebasing on the remote..."
     git -C "$CLAUDE_DIR" pull --rebase --autostash || {
-        echo "memo_save: rebase failed, fix it by hand in $CLAUDE_DIR"
+        _err "rebase failed, fix it by hand in $CLAUDE_DIR"
         return 1
     }
+
+    _info "pushing..."
     git -C "$CLAUDE_DIR" push || {
-        echo "memo_save: push failed, $CLAUDE_DIR is kept"
+        _err "push failed, $CLAUDE_DIR is kept (logout will move it to \$HOME)"
         return 1
     }
+    _ok "pushed"
 }
 
 mouse() {   
@@ -349,15 +420,19 @@ mouse() {
 }
 
 logout() {
+    _step "Pushing workspace repositories"
     # 1. Sync and push all workspace repositories (with null-glob modifier to prevent errors if empty)
     if [ -d "$WORKSPACE_GOINFRE" ]; then
         for repo in "$WORKSPACE_GOINFRE"/*(/N) ; do
             if [ -d "$repo/.git" ]; then
                 cd "$repo" || continue
                 if [[ -n $(git status -s) ]] || [[ -n $(git cherry -v 2>/dev/null) ]]; then
+                    _info "pushing ${repo:t}..."
                     git add .
                     git commit -m "Autosync on session logout: $(date)"
-                    git push
+                    git push && _ok "${repo:t} pushed" || _err "${repo:t} push FAILED"
+                else
+                    _info "${repo:t} already clean"
                 fi
             fi
         done
@@ -381,6 +456,7 @@ logout() {
     #    .claude is restored like the rest: if the push above failed, the clone
     #    is still in $HOME on the next session instead of being wiped, and the
     #    login token travels with it so there is no login to redo.
+    _step "Restoring directories to \$HOME"
     local relocated_dir="/goinfre/$USER/realocated"
     local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet" ".claude")
 
@@ -391,14 +467,20 @@ logout() {
         if [ -L "$target_home" ]; then
             rm "$target_home"
             if [ -d "$target_goinfre" ]; then
-                mv "$target_goinfre" "$target_home"
+                _info "moving $dir back to \$HOME..."
+                mv "$target_goinfre" "$target_home" && _ok "$dir restored"
+            else
+                _info "$dir: link removed, nothing on goinfre to restore"
             fi
         fi
     done
 
+    _step "Wiping goinfre"
     # 5. Wipe temporary goinfre runtime storage
+    _info "removing tools, 42-config, workspace and realocated..."
     rm -rf "$TOOLS"
     rm -rf "$CONFIG"
     rm -rf "$WORKSPACE_GOINFRE"
     rm -rf "$relocated_dir"
+    _ok "goinfre clean. Safe to log out."
 }
