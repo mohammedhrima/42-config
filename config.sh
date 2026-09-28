@@ -96,7 +96,7 @@ _install() {
     local name="${install_path:t}"
 
     if [ -d "$install_path" ]; then
-        _info "$name already installed ($install_path)"
+        # _info "$name already installed ($install_path)"
         return 0
     fi
 
@@ -126,29 +126,30 @@ _install() {
     _ok "$name ready, $(du -sh "$install_path" 2>/dev/null | cut -f1) in $install_path"
 }
 
-install() {
-    _step "Installing tools into $TOOLS"
-    # 1. Install tools first
-    _install "$VSCODE_URL" "$VSCODE_COMP" "$VSCODE_PATH" "$VSCODE_BIN" && \
-    _install "$NODE_URL" "$NODE_COMP" "$NODE_PATH" "$NODE_BIN" && \
-    _install "$UV_URL" "$UV_COMP" "$UV_PATH" "$UV_BIN" && \
-    _install "$FLUTTER_URL" "$FLUTTER_COMP" "$FLUTTER_PATH" "$FLUTTER_BIN"
-
-    PAPERDESK="$TOOLS/paperdesk"
-    if [ ! -d "$PAPERDESK" ]; then
-        _step "Installing paperdesk"
-        git clone git@github.com:mohammedhrima/paperdesk.git $PAPERDESK && \
-        make install -C $PAPERDESK && _ok "paperdesk ready"
-    else
-        _info "paperdesk already installed"
-    fi
-
-    _step "All tools done"
-    _info "PATH now starts with: node, code, uv, flutter"
-}
-
 # 2. Put newly installed tool bins at the very front of PATH immediately
 export PATH="$NODE_BIN:$VSCODE_BIN:$UV_PATH:$FLUTTER_BIN:$PATH"
+
+# install() {
+# _step "Installing tools into $TOOLS"
+# 1. Install tools first
+_install "$VSCODE_URL" "$VSCODE_COMP" "$VSCODE_PATH" "$VSCODE_BIN" && \
+_install "$NODE_URL" "$NODE_COMP" "$NODE_PATH" "$NODE_BIN" && \
+_install "$UV_URL" "$UV_COMP" "$UV_PATH" "$UV_BIN" && \
+_install "$FLUTTER_URL" "$FLUTTER_COMP" "$FLUTTER_PATH" "$FLUTTER_BIN"
+
+PAPERDESK="$TOOLS/paperdesk"
+if [ ! -d "$PAPERDESK" ]; then
+    _step "Installing paperdesk"
+    git clone git@github.com:mohammedhrima/paperdesk.git $PAPERDESK && \
+    make install -C $PAPERDESK && _ok "paperdesk ready"
+else
+    # _info "paperdesk already installed"
+fi
+
+# _step "All tools done"
+# _info "PATH now starts with: node, code, uv, flutter"
+# }
+
 
 # Dart downloads packages to ~/.pub-cache by default and it grows past a GB.
 # $HOME is the small disk, so keep it on goinfre like everything else.
