@@ -146,6 +146,41 @@ else
     # _info "paperdesk already installed"
 fi
 
+BEEKEEPER_PATH="$TOOLS/beekeeper"
+if [ ! -d "$BEEKEEPER_PATH" ]; then
+    _step "Installing beekeeper"
+    # releases/latest redirects to .../tag/vX.Y.Z. Read the version from there
+    # rather than from the GitHub API: the whole cluster shares one public IP,
+    # and the API allows 60 unauthenticated calls per hour per IP.
+    local bk_version=$(curl -fsIL -o /dev/null -w '%{url_effective}' \
+        "https://github.com/beekeeper-studio/beekeeper-studio/releases/latest" | sed -n 's|.*/tag/v||p')
+    local bk_stage="$TOOLS/.beekeeper-stage"
+
+    if [ -z "$bk_version" ]; then
+        _err "beekeeper: could not find the latest version"
+    else
+        local bk_url="https://github.com/beekeeper-studio/beekeeper-studio/releases/download/v$bk_version/Beekeeper-Studio-$bk_version.AppImage"
+        rm -rf "$bk_stage"
+        mkdir -p "$bk_stage"
+        _info "from $bk_url"
+        _info "downloading..."
+        # Extracted once instead of run as an AppImage: running it needs FUSE,
+        # which needs sudo, and --appimage-extract-and-run unpacks 1 GB to /tmp
+        # on every launch. Extracting in a staging directory means a failed
+        # attempt leaves no half-installed $BEEKEEPER_PATH behind.
+        if curl -fL --progress-bar "$bk_url" -o "$bk_stage/beekeeper.AppImage" && \
+           chmod +x "$bk_stage/beekeeper.AppImage" && \
+           _info "extracting to $BEEKEEPER_PATH" && \
+           (cd "$bk_stage" && ./beekeeper.AppImage --appimage-extract > /dev/null) && \
+           mv "$bk_stage/squashfs-root" "$BEEKEEPER_PATH"; then
+            _ok "beekeeper $bk_version ready, $(du -sh "$BEEKEEPER_PATH" 2>/dev/null | cut -f1) in $BEEKEEPER_PATH"
+        else
+            _err "beekeeper: install failed"
+        fi
+        rm -rf "$bk_stage"
+    fi
+fi
+
 # _step "All tools done"
 # _info "PATH now starts with: node, code, uv, flutter"
 # }
@@ -412,7 +447,17 @@ memo_save() {
     _ok "pushed"
 }
 
-mouse() {   
+# Start Beekeeper Studio detached from the terminal, so the prompt comes back
+# and closing the terminal does not close the app.
+beekeeper() {
+    if [ ! -x "$BEEKEEPER_PATH/AppRun" ]; then
+        _err "beekeeper is not installed, run 'update' to install it"
+        return 1
+    fi
+    "$BEEKEEPER_PATH/AppRun" "$@" > /dev/null 2>&1 &!
+}
+
+mouse() {
     while true; do
         xdotool mousemove_relative -- 1 0
         # Sleep for 5 minutes (5 * 60 = 300 seconds)

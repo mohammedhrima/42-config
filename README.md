@@ -18,6 +18,7 @@ It uses `/goinfre/$USER` for persistent storage and provides automatic tool inst
   * Node.js
   * Astral `uv`
   * Paperdesk
+  * Beekeeper Studio, started with `beekeeper`
 * **Persistent workspace** stored in `/goinfre/$USER/workspace`.
 * **Desktop workspace symlink** at `~/Desktop/workspace`.
 * **Repository management** through `add` and `repos`.
@@ -165,7 +166,8 @@ The installation directories are:
 ├── code/
 ├── node/
 ├── uv/
-└── paperdesk/
+├── paperdesk/
+└── beekeeper/
 ```
 
 The installer only installs a tool when its installation directory does not already exist.
@@ -233,6 +235,28 @@ make install -C /goinfre/$USER/tools/paperdesk
 ```
 
 > Paperdesk itself is cloned through SSH, so GitHub SSH authentication may be required for this step.
+
+---
+
+## Beekeeper Studio
+
+The latest Beekeeper Studio AppImage is downloaded from GitHub and extracted into:
+
+```text
+/goinfre/$USER/tools/beekeeper
+```
+
+It is extracted once rather than run as an AppImage, so neither `sudo` nor FUSE is needed, and each launch does not unpack the app again.
+
+Start it with:
+
+```bash
+beekeeper
+```
+
+The app runs detached from the terminal, so the prompt comes back immediately and closing the terminal does not close the app.
+
+Saved connections live in `~/.config/beekeeper-studio`, which is in `$HOME` and therefore survives `logout`.
 
 ---
 
