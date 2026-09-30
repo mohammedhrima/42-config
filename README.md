@@ -1,833 +1,226 @@
-# 42-Config
+# 42-config
 
-A persistent Zsh environment and workspace manager designed for **42 / 1337 school workstations**.
+A development environment for 42 / 1337 workstations, where `/goinfre` is wiped
+between sessions and `$HOME` is small.
 
-`42-config` automates the setup of a development environment on machines where the home directory and installed software may not persist between sessions.
+It keeps heavy directories on `/goinfre`, installs your tools without root,
+restores your repositories on any workstation, and pushes everything before the
+machine is wiped.
 
-It uses `/goinfre/$USER` for persistent storage and provides automatic tool installation, workspace management, repository tracking, disk-space relocation, and session cleanup.
-
----
-
-## Features
-
-* **Automatic initialization** through a small `.zshrc` configuration.
-* **Persistent configuration** stored in `/goinfre/$USER/42-config`.
-* **Automatic tool installation**:
-
-  * Visual Studio Code
-  * Node.js
-  * Astral `uv`
-  * Paperdesk
-  * Beekeeper Studio, started with `beekeeper`
-* **Persistent workspace** stored in `/goinfre/$USER/workspace`.
-* **Desktop workspace symlink** at `~/Desktop/workspace`.
-* **Repository management** through `add` and `repos`.
-* **Repository tracking** using `~/repos.toml`.
-* **Automatic local branch creation** for remote branches.
-* **Disk-space optimization** with `space`.
-* **Private per-user settings** in `~/.42-custom.sh`, kept out of this repository.
-* **Optional private `~/.claude`** synchronization with `memo`.
-* **Automatic Git synchronization** with `logout`.
-* **Session cleanup** after logout.
-* **Path protection** to ensure the configuration is running from the expected location.
+Everything personal lives in `~/42.toml`, which is not part of this repository.
+Nothing in here refers to any particular person, machine or repository.
 
 ---
 
-# Installation
+## The one thing to understand first
 
-## 1. Add the bootstrap to `.zshrc`
+`/goinfre` is **local to each workstation** and is wiped when you change post.
 
-Add the following to your `~/.zshrc`:
+Anything you put there is gone unless it is either pushed to a git remote or
+marked `keep = true` so `42 logout` moves it into `$HOME` first. `$HOME` follows
+you between workstations; `/goinfre` does not.
 
-```zsh
-CONFIG="/goinfre/$USER/42-config"
-CONFIG_URL="https://github.com/mohammedhrima/42-config.git"
-
-init() {
-    cd ~ || return 1
-    echo "cloning $CONFIG..."
-    if [ ! -d "$CONFIG" ]; then
-        git clone "$CONFIG_URL" "$CONFIG" || return 1
-    fi
-    source "$CONFIG/config.sh"
-}
-
-if [ -d "$CONFIG" ]; then
-    echo "$CONFIG already exists"
-    source "$CONFIG/config.sh"
-fi
-```
-
-The bootstrap uses HTTPS to clone `42-config`, so an SSH key is **not required to initialize the configuration**.
+Get this wrong and you lose data. Most of this configuration exists to get it
+right for you.
 
 ---
 
-## 2. Initialize 42-Config
+## Install
 
-Reload your Zsh configuration:
-
-```bash
-source ~/.zshrc
-```
-
-Then run:
-
-```bash
-init
-```
-
-If `/goinfre/$USER/42-config` does not exist, `init` clones:
-
-```text
-https://github.com/mohammedhrima/42-config.git
-```
-
-into:
-
-```text
-/goinfre/$USER/42-config
-```
-
-and loads:
-
-```text
-/goinfre/$USER/42-config/config.sh
-```
-
-If the directory already exists, `init` simply sources the existing configuration.
-
----
-
-## 3. Subsequent sessions
-
-On future sessions, the following block in `.zshrc` automatically loads the existing configuration:
-
-```zsh
-if [ -d "$CONFIG" ]; then
-    echo "$CONFIG already exists"
-    source "$CONFIG/config.sh"
-fi
-```
-
-You therefore do not need to run `init` every time.
-
----
-
-# Directory Structure
-
-The environment uses `/goinfre/$USER` as its persistent storage area:
-
-```text
-/goinfre/$USER/
-├── 42-config/
-├── tools/
-├── realocated/
-└── workspace/
-```
-
-Your home directory keeps the files that must survive the session cleanup:
-
-```text
-$HOME/
-├── repos.toml        tracked repositories
-└── .42-custom.sh     private settings, mode 600
-```
-
----
-
-# Configuration
-
-The configuration repository must be located at:
-
-```text
-/goinfre/$USER/42-config
-```
-
-When `config.sh` is sourced, it checks its own location.
-
-If it is not running from the expected directory, it prints instructions to either move the repository or clone a fresh copy into `/goinfre/$USER/42-config`.
-
-This prevents the configuration from operating from an unexpected location.
-
----
-
-# Automatic Tool Installation
-
-When the configuration is loaded, missing tools are automatically downloaded and installed under:
-
-```text
-/goinfre/$USER/tools
-```
-
-The installation directories are:
-
-```text
-/goinfre/$USER/tools/
-├── code/
-├── node/
-├── uv/
-├── paperdesk/
-└── beekeeper/
-```
-
-The installer only installs a tool when its installation directory does not already exist.
-
----
-
-## Visual Studio Code
-
-The latest stable Linux x64 version of Visual Studio Code is downloaded and installed into:
-
-```text
-/goinfre/$USER/tools/code
-```
-
----
-
-## Node.js
-
-The latest Linux x64 Node.js release is detected automatically and installed into:
-
-```text
-/goinfre/$USER/tools/node
-```
-
----
-
-## uv
-
-Astral's `uv` is installed into:
-
-```text
-/goinfre/$USER/tools/uv
-```
-
----
-
-## PATH
-
-After installation, the tool directories are added to the beginning of `PATH`:
-
-```text
-node
-VS Code
-uv
-existing PATH
-```
-
-The shell is then rehashed so the commands are immediately available.
-
----
-
-## Paperdesk
-
-If Paperdesk is not already installed, it is automatically cloned and installed:
-
-```text
-/goinfre/$USER/tools/paperdesk
-```
-
-The installation uses:
-
-```bash
-git clone git@github.com:mohammedhrima/paperdesk.git
-make install -C /goinfre/$USER/tools/paperdesk
-```
-
-> Paperdesk itself is cloned through SSH, so GitHub SSH authentication may be required for this step.
-
----
-
-## Beekeeper Studio
-
-The latest Beekeeper Studio AppImage is downloaded from GitHub and extracted into:
-
-```text
-/goinfre/$USER/tools/beekeeper
-```
-
-It is extracted once rather than run as an AppImage, so neither `sudo` nor FUSE is needed, and each launch does not unpack the app again.
-
-Start it with:
-
-```bash
-beekeeper
-```
-
-The app runs detached from the terminal, so the prompt comes back immediately and closing the terminal does not close the app.
-
-Saved connections live in `~/.config/beekeeper-studio`, which is in `$HOME` and therefore survives `logout`.
-
----
-
-# Workspace
-
-The persistent workspace is:
-
-```text
-/goinfre/$USER/workspace
-```
-
-It is automatically created when the configuration is loaded.
-
-A symbolic link is also created on the Desktop:
-
-```text
-~/Desktop/workspace
-        │
-        └── → /goinfre/$USER/workspace
-```
-
-This means you can access your projects normally from:
-
-```text
-~/Desktop/workspace
-```
-
-while the actual files are stored in `/goinfre`.
-
-The Desktop symlink is only created if `~/Desktop/workspace` does not already exist as either a directory or symbolic link.
-
----
-
-# Repository Management
-
-`42-config` keeps track of your projects using:
-
-```text
-~/repos.toml
-```
-
-This allows your repository list to survive the cleanup performed at logout.
-
----
-
-## `add`
-
-Add a repository to your workspace.
-
-### Usage
-
-```bash
-add <repo_url> <dir_name>
-```
-
-Example:
-
-```bash
-add git@github.com:mohammedhrima/ura-lang.git ura-lang
-```
-
-The repository will be cloned into:
-
-```text
-/goinfre/$USER/workspace/ura-lang
-```
-
-and registered in:
-
-```text
-~/repos.toml
-```
-
-### Example
-
-```bash
-add https://github.com/user/project.git project
-```
-
-Result:
-
-```text
-/goinfre/$USER/workspace/project
-```
-
-and:
-
-```toml
-[repositories]
-project = "https://github.com/user/project.git"
-```
-
-The repository is cloned using:
-
-```bash
-git clone --no-single-branch
-```
-
-so its remote branches are available locally.
-
-If the target directory already exists, the repository is not cloned again.
-
----
-
-# `repos`
-
-Restore all repositories registered in:
-
-```text
-~/repos.toml
-```
-
-Usage:
-
-```bash
-repos
-```
-
-For each repository that does not already exist, `repos`:
-
-1. Clones the repository.
-2. Retrieves its remote branches.
-3. Creates local branches corresponding to those remote branches.
-4. Checks out `main`.
-5. Falls back to `master` if `main` does not exist.
-
-For example, if the remote contains:
-
-```text
-origin/main
-origin/dev
-origin/feature/login
-```
-
-the command creates:
-
-```text
-main
-dev
-feature/login
-```
-
-as local branches.
-
-Repositories that already exist in the workspace are skipped.
-
----
-
-# Repository Configuration
-
-The tracking file is:
-
-```text
-~/repos.toml
-```
-
-Example:
-
-```toml
-[repositories]
-ura-lang = "git@github.com:mohammedhrima/ura-lang.git"
-project-a = "git@github.com:user/project-a.git"
-project-b = "https://github.com/user/project-b.git"
-```
-
-The file is stored in `$HOME` rather than `/goinfre` so that it survives the session cleanup.
-
----
-
-# Private settings
-
-This repository is public, and `logout` deletes everything under `/goinfre/$USER`, including this repository. A file placed next to `config.sh` and excluded with `.gitignore` would therefore be gone on the next session.
-
-Anything private or machine-specific belongs in:
-
-```text
-~/.42-custom.sh
-```
-
-It is created with mode `600` the first time `config.sh` runs, containing only comments, and is sourced on every load. An empty one changes nothing, so the configuration behaves identically for anyone who never edits it.
-
-Recognised settings:
+Clone it and add the bootstrap to `~/.zshrc`:
 
 ```sh
-# Private repository holding your ~/.claude directory.
-# Leave it unset and `memo` does nothing.
-CLAUDE_MEMO_URL="git@github.com:<you>/<your-private-repo>.git"
-```
-
----
-
-# `memo`
-
-`memo` relocates `~/.claude` to `/goinfre/$USER/realocated/.claude` like the directories handled by `space`, except that it is a clone of a private repository rather than an empty directory. Your Claude Code conversations, plans and skills then follow you from one workstation to the next.
-
-It does nothing while `CLAUDE_MEMO_URL` is unset.
-
-Usage:
-
-```bash
-memo
-```
-
-`space` calls it, so `init` sets it up along with everything else.
-
-On the first run the existing `~/.claude` is merged into the clone and then kept as `~/.claude.bak.<timestamp>`. Nothing is deleted. Files the repository already carries win, so settings pushed from another workstation are preserved; the local login token is the exception, since it is the one that currently works.
-
-`memo` refuses to run while Claude Code is open, because it moves the directory Claude reads its state from. If the clone fails, `~/.claude` is left exactly as it was.
-
-## `memo_save`
-
-```bash
-memo_save
-```
-
-Commits the clone, rebases onto the remote and pushes. `logout` runs it.
-
-Which files are tracked is decided by the `.gitignore` **inside your private repository**, not by this one. The recommended form denies everything and whitelists what is worth keeping:
-
-```text
-/*
-!/.gitignore
-!/settings.json
-!/projects/
-!/plans/
-!/skills/
-```
-
-This keeps caches, plugins, IDE lock files and per-session state out of the history. `memo_save` verifies those rules before every push and refuses to push if they are missing, so a lost `.gitignore` cannot publish session state.
-
----
-
-# Disk Space Management
-
-## `space`
-
-The `space` command relocates large development directories from `$HOME` to `/goinfre`.
-
-Usage:
-
-```bash
-space
-```
-
-Currently managed directories are:
-
-```text
-.cache
-.npm
-.vscode
-.vscode-shared
-.copilot
-.dotnet
-```
-
-The destination is:
-
-```text
-/goinfre/$USER/realocated
-```
-
-For example:
-
-```text
-$HOME/.npm
-```
-
-becomes:
-
-```text
-/goinfre/$USER/realocated/.npm
-```
-
-and:
-
-```text
-$HOME/.npm
-```
-
-becomes a symbolic link pointing to the relocated directory.
-
-Conceptually:
-
-```text
-$HOME/.npm
-      │
-      └── symlink ──→ /goinfre/$USER/realocated/.npm
-```
-
-This allows applications to continue using their normal `$HOME` paths while the actual data is stored in `/goinfre`.
-
-The command only moves directories that exist and are not already symbolic links.
-
-Finally, `space` calls [`memo`](#memo), which relocates `~/.claude` the same way when `CLAUDE_MEMO_URL` is configured and does nothing otherwise.
-
----
-
-# `update`
-
-Reload the current configuration without opening a new shell:
-
-```bash
-update
-```
-
-This is equivalent to:
-
-```bash
-source /goinfre/$USER/42-config/config.sh
-```
-
-Useful after modifying `config.sh`.
-
----
-
-# `clean`
-
-The configuration also provides:
-
-```bash
-clean
-```
-
-which is an alias for:
-
-```bash
-clear
-```
-
----
-
-# `logout`
-
-`logout` synchronizes your workspace and cleans the workstation environment.
-
-Usage:
-
-```bash
-logout
-```
-
-## 1. Synchronize repositories
-
-Every Git repository directly inside:
-
-```text
-/goinfre/$USER/workspace
-```
-
-is checked.
-
-If a repository has:
-
-* uncommitted changes, or
-* unpushed commits,
-
-the script runs:
-
-```bash
-git add .
-git commit -m "Autosync on session logout: <timestamp>"
-git push
-```
-
-This allows your work to be pushed before the local workspace is removed.
-
----
-
-## 2. Push the private `~/.claude` repository
-
-`logout` then runs [`memo_save`](#memo_save), which commits and pushes the `.claude` clone. This step does nothing unless `CLAUDE_MEMO_URL` is set.
-
----
-
-## 3. Restore relocated directories to `$HOME`
-
-If `space` was previously used, `logout` removes each symbolic link from `$HOME` and moves the real directory back out of `/goinfre`:
-
-```text
-$HOME/.cache
-$HOME/.npm
-$HOME/.vscode
-$HOME/.vscode-shared
-$HOME/.copilot
-$HOME/.dotnet
-$HOME/.claude
-```
-
-Only symbolic links are replaced this way.
-
-Because `.claude` is restored rather than wiped, a failed push in step 2 costs nothing: the clone is waiting in `$HOME` on the next session, and `memo` moves it back to `/goinfre` instead of cloning again. The login token travels with it, so there is no login to redo.
-
----
-
-## 4. Remove temporary environment
-
-Finally, `logout` removes:
-
-```text
-/goinfre/$USER/tools
-/goinfre/$USER/42-config
-/goinfre/$USER/workspace
-/goinfre/$USER/realocated
-```
-
-This leaves the workstation environment clean.
-
-On the next session, the `.zshrc` bootstrap can clone `42-config` again and rebuild the environment.
-
----
-
-# Typical Workflow
-
-## First setup
-
-Add the bootstrap to `~/.zshrc`:
-
-```zsh
 CONFIG="/goinfre/$USER/42-config"
-CONFIG_URL="https://github.com/mohammedhrima/42-config.git"
+CONFIG_URL="https://github.com/<owner>/42-config.git"
 
-init() {
-    cd ~ || return 1
-    echo "cloning $CONFIG..."
+login() {
     if [ ! -d "$CONFIG" ]; then
         git clone "$CONFIG_URL" "$CONFIG" || return 1
     fi
-    source "$CONFIG/config.sh"
+    source "$CONFIG/config.sh" && 42 space
 }
 
 if [ -d "$CONFIG" ]; then
-    echo "$CONFIG already exists"
     source "$CONFIG/config.sh"
 fi
 ```
 
-Then:
+Then, on a new workstation, run `login` once. Later terminals pick it up by
+themselves.
 
-```bash
-source ~/.zshrc
-init
+The repository must sit at `/goinfre/$USER/42-config`; `config.sh` refuses to run
+from anywhere else, because everything is relative to that path.
+
+Requirements: `zsh`, `python3` 3.11 or newer, `git`, `curl`. All present on a 42
+workstation.
+
+---
+
+## Commands
+
+Run `42 --help` for the current list.
+
+| Command | What it does |
+|---|---|
+| `42 space` | Put everything where it belongs on this workstation. Run once per session. |
+| `42 install --all` | Download every tool listed in `~/42.toml`. |
+| `42 install uv node` | Install those tools and remember them for next time. |
+| `42 add <url> <path>` | Register a repository and clone it. |
+| `42 ext` | Install the VS Code extensions you listed. |
+| `42 ext add <publisher.name>` | Add one extension and install it. |
+| `42 ext save` | Replace the list with whatever is installed now. |
+| `42 gcache save` / `load` | Back up or restore the Chrome profile. |
+| `42 logout` | Push everything, free the disk, wipe `/goinfre`. |
+| `42 update` | Re-read `config.sh` after editing it. |
+| `42 mouse` | Nudge the pointer so the session does not lock. |
+
+`logout` also works on its own, since it is typed every session.
+
+---
+
+## `~/42.toml`
+
+Created on first run. It is the only file you edit.
+
+```toml
+[git]
+# A workstation has no git identity, so git invents $USER@$HOST and every post
+# authors commits under a different address.
+name  = "<your name>"
+email = "<your@email>"
+
+[display]
+resolution   = "2560x1440"   # empty = do not touch the display
+output       = "eDP"
+gnome_tweaks = false         # true also sets dock size and scaling
+
+[tools]
+# code, node, uv, flutter, ninja, android, beekeeper
+enabled = ["code", "node", "uv"]
+
+[browser]
+backup_repo = ""             # private repo for the Chrome profile; empty = off
+
+[extensions]
+# 42 ext add <publisher.name> writes here
+python = "ms-python.python"
+
+[vscode.settings]
+# Written into settings.json, keeping your comments
+"workbench.colorTheme" = "Default Dark Modern"
 ```
 
 ---
 
-## Free disk space
+## Managed directories
 
-```bash
-space
+One concept covers caches, work repositories and private configuration.
+
+```toml
+[[dirs]]
+path  = "realocated/.cache"    # where it lives under /goinfre/$USER
+link  = ".cache"               # symlink this $HOME path to it
+```
+
+```toml
+[[dirs]]
+path = "workspace/my-project"
+url  = "git@github.com:<owner>/my-project.git"
+```
+
+```toml
+[[dirs]]
+path  = "realocated/.config/nvim"
+link  = ".config/nvim"
+url   = "git@github.com:<owner>/nvim-config.git"
+keep  = true                   # logout carries it into $HOME
+guard = "nvim"                 # refuse to move it while nvim runs
+build = "make install"         # run this after a fresh clone
+```
+
+| Field | Meaning |
+|---|---|
+| `path` | Location under `/goinfre/$USER`. Required. |
+| `url` | Clone from here. Absent means create an empty directory. |
+| `link` | `$HOME` path to symlink to it. Absent means no symlink. |
+| `keep` | `logout` moves it into `$HOME` instead of letting it be wiped. |
+| `guard` | A process that must not be running while it is moved. |
+| `build` | Command run inside it after a fresh clone. |
+
+`path` plus `link` is a cache. Add `url` and it is a clone. Add `keep` and it
+survives the wipe.
+
+Add entries with `42 add`, or by editing the file.
+
+### First run on a machine that already has the directory
+
+The existing directory is merged into the clone and then **renamed**, never
+deleted, to `<name>.bak.<timestamp>`. What the repository already holds wins, so
+data pushed from another workstation is not overwritten by a local stub.
+
+For files that belong to this machine rather than the repository, such as a login
+token:
+
+```sh
+42 space --prefer-local .credentials.json
 ```
 
 ---
 
-## Add a project
+## What `42 logout` does, and in what order
 
-```bash
-add git@github.com:mohammedhrima/ura-lang.git ura-lang
-```
+The order matters and is not obvious.
 
-Your project is now available at:
+1. Save VS Code's settings out of a directory that is otherwise cache.
+2. **Drop caches.** Before anything is pushed, not after: running out of disk in
+   the middle of a push is the one failure here that loses work.
+3. Push every registered repository.
+4. Back up the browser profile, if configured.
+5. Delete the remaining caches and the tools, which are all re-downloadable.
+6. Move every `keep` directory into `$HOME`, checking there is room first.
+7. Wipe `/goinfre`.
 
-```text
-~/Desktop/workspace/ura-lang
-```
+If something is **not pushed and does not fit in `$HOME`**, it stops at step 6,
+leaves your data on `/goinfre`, and tells you so. It will not wipe a disk holding
+the only copy of something.
 
----
-
-## Restore projects
-
-```bash
-repos
-```
-
----
-
-## Update the configuration
-
-```bash
-update
-```
+`docker/` is never deleted.
 
 ---
 
-## End the session
-
-```bash
-logout
-```
-
-The repositories are synchronized and the temporary environment is removed.
-
----
-
-# Architecture
-
-```text
-                         ~/.zshrc
-                            │
-                            ▼
-                          init
-                            │
-                            ▼
-              /goinfre/$USER/42-config
-                            │
-                            ▼
-                       config.sh
-                            │
-          ┌─────────────────┼─────────────────┐
-          │                 │                 │
-          ▼                 ▼                 ▼
-       tools/           workspace/       realocated/
-          │                 │                 │
-     ┌────┼────┐            │          ┌──────┼──────┐
-     │    │    │            │          │      │      │
-    code node  uv        projects     .cache  .npm   ...
-          │                 │
-          │                 │
-          └─────────────────┘
-                    │
-                    ▼
-          ~/Desktop/workspace
-                 symlink
-```
-
-Persistent repository metadata:
-
-```text
-$HOME/repos.toml
-```
-
-Temporary/persistent workstation data:
+## Layout
 
 ```text
 /goinfre/$USER/
-├── 42-config
-├── tools
-├── workspace
-└── realocated
+├── 42-config/     this repository
+├── tools/         code, node, uv, ... re-downloaded per workstation
+├── realocated/    directories moved out of $HOME
+└── workspace/     your repositories
+
+$HOME/
+├── 42.toml        your settings, the only file you edit
+└── .zshrc         the bootstrap above
 ```
 
-At logout, the `/goinfre` environment is cleaned and `~/repos.toml` remains available for the next session.
+```text
+42-config/
+├── config.sh      45 lines: PATH, environment, the `42` function
+└── lib/           everything else, in Python
+```
+
+`config.sh` is small on purpose. Only a sourced script can change the shell's
+`PATH` and define its functions, so that is all it does. Run `42 env` to see
+exactly what it exports; only tools that are actually installed are added, so a
+missing one cannot break your `PATH`.
 
 ---
 
-# Requirements
+## Troubleshooting
 
-The environment requires:
-
-* Zsh
-* Git
-* `curl`
-* `tar`
-* standard Unix utilities
-* Internet access
-
-GitHub authentication is required for repositories that use SSH URLs.
-
-The initial `42-config` bootstrap uses HTTPS, so it does not require SSH authentication.
-
----
-
-# Important Notes
-
-* `42-config` must be located at `/goinfre/$USER/42-config`.
-* The configuration automatically installs tools that are missing.
-* `add` clones repositories using `--no-single-branch`.
-* `repos` additionally creates local branches for remote branches.
-* `repos` skips repositories that already exist.
-* `space` moves only the predefined heavy directories.
-* `logout` only scans Git repositories directly inside `workspace`.
-* `logout` performs `git push`, so repositories must have working Git authentication.
-* `logout` deletes the local `42-config` repository itself.
-* `~/repos.toml` is **not** deleted by `logout`.
-* On the next session, the `.zshrc` bootstrap can recreate the environment automatically.
+| Symptom | Cause |
+|---|---|
+| `command not found: 42` | Terminal older than the last change. Run `42 update` or open a new one. |
+| `<process> is running. Close it` | A `guard` directory is about to move. Close that program. |
+| `42-config must live in ...` | Move the repository to `/goinfre/$USER/42-config`. |
+| `<name>.bak.<timestamp>` in `$HOME` | Your directory from before the first merge. Delete it once a full session has worked. |
+| An extension will not install | It is not on the marketplace. Use a `[[dirs]]` entry with `build`. |
