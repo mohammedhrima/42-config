@@ -34,6 +34,8 @@ class Tool:
     unpack: Callable[[Path, Path], None]
     #: Directory added to PATH, relative to the install directory.
     bin_subdir: str = ""
+    #: Other tools this one needs. Installed first.
+    requires: tuple[str, ...] = ()
 
     def bin_path(self, tools_dir: Path) -> Path:
         directory = tools_dir / self.name
@@ -162,8 +164,11 @@ TOOLS: dict[str, Tool] = {
                      "uv-x86_64-unknown-linux-gnu.tar.gz"),
         unpack=unpack_tarball,
     ),
+    # Building for Linux desktop goes through CMake, which needs Ninja, and
+    # building for Android needs the SDK. Installing Flutter alone gives you a
+    # Flutter that cannot build anything.
     "flutter": Tool(name="flutter", url=_latest_flutter, unpack=unpack_tarball,
-                    bin_subdir="bin"),
+                    bin_subdir="bin", requires=("ninja", "android")),
     "ninja": Tool(
         name="ninja",
         url=lambda: ("https://github.com/ninja-build/ninja/releases/latest/download/"
@@ -179,6 +184,26 @@ TOOLS: dict[str, Tool] = {
     ),
     "beekeeper": Tool(name="beekeeper", url=_latest_beekeeper, unpack=unpack_appimage),
 }
+
+
+def with_requirements(names: list[str]) -> list[str]:
+    """Expand a list of tools to include what they need, dependencies first.
+
+    Order is preserved and repeats are dropped, so `42 install flutter` installs
+    ninja and the Android SDK before Flutter itself.
+    """
+    resolved: list[str] = []
+
+    def visit(name: str) -> None:
+        if name in resolved or name not in TOOLS:
+            return
+        for requirement in TOOLS[name].requires:
+            visit(requirement)
+        resolved.append(name)
+
+    for name in names:
+        visit(name)
+    return resolved
 
 
 def _download(url: str, destination: Path) -> bool:

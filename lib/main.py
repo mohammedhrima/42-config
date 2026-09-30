@@ -137,6 +137,12 @@ def cmd_install(conf: cfg.Config, args: argparse.Namespace) -> int:
         log.info(f"available: {', '.join(tools.TOOLS)}")
         return 1
 
+    asked = list(wanted)
+    wanted = tools.with_requirements(wanted)
+    pulled_in = [name for name in wanted if name not in asked]
+    if pulled_in:
+        log.info(f"also needed: {', '.join(pulled_in)}")
+
     log.step(f"Installing into {conf.tools_dir}")
     failed = [name for name in wanted
               if not tools.install(tools.TOOLS[name], conf.tools_dir)]
