@@ -45,6 +45,9 @@ if [ ! -f "$CUSTOM" ]; then
 # so every post authors commits under a different address.
 # GIT_NAME="<your name>"
 # GIT_EMAIL="<your@email>"
+
+# Private repository for the Chrome profile backup used by `gcache`.
+# GCACHE_URL="git@github.com:<you>/<your-private-repo>.git"
 CUSTOM_EOF
     chmod 600 "$CUSTOM"
     echo "Created $CUSTOM"
@@ -149,54 +152,55 @@ export PATH="$NODE_BIN:$VSCODE_BIN:$UV_PATH:$FLUTTER_BIN:$PATH"
 # install() {
 # _step "Installing tools into $TOOLS"
 # 1. Install tools first
-_install "$VSCODE_URL" "$VSCODE_COMP" "$VSCODE_PATH" "$VSCODE_BIN" && \
-_install "$NODE_URL" "$NODE_COMP" "$NODE_PATH" "$NODE_BIN" && \
-_install "$UV_URL" "$UV_COMP" "$UV_PATH" "$UV_BIN" && \
-_install "$FLUTTER_URL" "$FLUTTER_COMP" "$FLUTTER_PATH" "$FLUTTER_BIN"
+_install "$VSCODE_URL" "$VSCODE_COMP" "$VSCODE_PATH" "$VSCODE_BIN" 
+# && \
+# _install "$NODE_URL" "$NODE_COMP" "$NODE_PATH" "$NODE_BIN" && \
+# _install "$UV_URL" "$UV_COMP" "$UV_PATH" "$UV_BIN" && \
+# _install "$FLUTTER_URL" "$FLUTTER_COMP" "$FLUTTER_PATH" "$FLUTTER_BIN"
 
-PAPERDESK="$TOOLS/paperdesk"
-if [ ! -d "$PAPERDESK" ]; then
-    _step "Installing paperdesk"
-    git clone git@github.com:mohammedhrima/paperdesk.git $PAPERDESK && \
-    make install -C $PAPERDESK && _ok "paperdesk ready"
-else
-    # _info "paperdesk already installed"
-fi
+# PAPERDESK="$TOOLS/paperdesk"
+# if [ ! -d "$PAPERDESK" ]; then
+#     _step "Installing paperdesk"
+#     git clone git@github.com:mohammedhrima/paperdesk.git $PAPERDESK && \
+#     make install -C $PAPERDESK && _ok "paperdesk ready"
+# else
+#     # _info "paperdesk already installed"
+# fi
 
-BEEKEEPER_PATH="$TOOLS/beekeeper"
-if [ ! -d "$BEEKEEPER_PATH" ]; then
-    _step "Installing beekeeper"
-    # releases/latest redirects to .../tag/vX.Y.Z. Read the version from there
-    # rather than from the GitHub API: the whole cluster shares one public IP,
-    # and the API allows 60 unauthenticated calls per hour per IP.
-    local bk_version=$(curl -fsIL -o /dev/null -w '%{url_effective}' \
-        "https://github.com/beekeeper-studio/beekeeper-studio/releases/latest" | sed -n 's|.*/tag/v||p')
-    local bk_stage="$TOOLS/.beekeeper-stage"
+# BEEKEEPER_PATH="$TOOLS/beekeeper"
+# if [ ! -d "$BEEKEEPER_PATH" ]; then
+#     _step "Installing beekeeper"
+#     # releases/latest redirects to .../tag/vX.Y.Z. Read the version from there
+#     # rather than from the GitHub API: the whole cluster shares one public IP,
+#     # and the API allows 60 unauthenticated calls per hour per IP.
+#     local bk_version=$(curl -fsIL -o /dev/null -w '%{url_effective}' \
+#         "https://github.com/beekeeper-studio/beekeeper-studio/releases/latest" | sed -n 's|.*/tag/v||p')
+#     local bk_stage="$TOOLS/.beekeeper-stage"
 
-    if [ -z "$bk_version" ]; then
-        _err "beekeeper: could not find the latest version"
-    else
-        local bk_url="https://github.com/beekeeper-studio/beekeeper-studio/releases/download/v$bk_version/Beekeeper-Studio-$bk_version.AppImage"
-        rm -rf "$bk_stage"
-        mkdir -p "$bk_stage"
-        _info "from $bk_url"
-        _info "downloading..."
-        # Extracted once instead of run as an AppImage: running it needs FUSE,
-        # which needs sudo, and --appimage-extract-and-run unpacks 1 GB to /tmp
-        # on every launch. Extracting in a staging directory means a failed
-        # attempt leaves no half-installed $BEEKEEPER_PATH behind.
-        if curl -fL --progress-bar "$bk_url" -o "$bk_stage/beekeeper.AppImage" && \
-           chmod +x "$bk_stage/beekeeper.AppImage" && \
-           _info "extracting to $BEEKEEPER_PATH" && \
-           (cd "$bk_stage" && ./beekeeper.AppImage --appimage-extract > /dev/null) && \
-           mv "$bk_stage/squashfs-root" "$BEEKEEPER_PATH"; then
-            _ok "beekeeper $bk_version ready, $(du -sh "$BEEKEEPER_PATH" 2>/dev/null | cut -f1) in $BEEKEEPER_PATH"
-        else
-            _err "beekeeper: install failed"
-        fi
-        rm -rf "$bk_stage"
-    fi
-fi
+#     if [ -z "$bk_version" ]; then
+#         _err "beekeeper: could not find the latest version"
+#     else
+#         local bk_url="https://github.com/beekeeper-studio/beekeeper-studio/releases/download/v$bk_version/Beekeeper-Studio-$bk_version.AppImage"
+#         rm -rf "$bk_stage"
+#         mkdir -p "$bk_stage"
+#         _info "from $bk_url"
+#         _info "downloading..."
+#         # Extracted once instead of run as an AppImage: running it needs FUSE,
+#         # which needs sudo, and --appimage-extract-and-run unpacks 1 GB to /tmp
+#         # on every launch. Extracting in a staging directory means a failed
+#         # attempt leaves no half-installed $BEEKEEPER_PATH behind.
+#         if curl -fL --progress-bar "$bk_url" -o "$bk_stage/beekeeper.AppImage" && \
+#            chmod +x "$bk_stage/beekeeper.AppImage" && \
+#            _info "extracting to $BEEKEEPER_PATH" && \
+#            (cd "$bk_stage" && ./beekeeper.AppImage --appimage-extract > /dev/null) && \
+#            mv "$bk_stage/squashfs-root" "$BEEKEEPER_PATH"; then
+#             _ok "beekeeper $bk_version ready, $(du -sh "$BEEKEEPER_PATH" 2>/dev/null | cut -f1) in $BEEKEEPER_PATH"
+#         else
+#             _err "beekeeper: install failed"
+#         fi
+#         rm -rf "$bk_stage"
+#     fi
+# fi
 
 # _step "All tools done"
 # _info "PATH now starts with: node, code, uv, flutter"
@@ -316,7 +320,7 @@ space() {
 
     # An entry may contain a slash (".config/Code"), so every mkdir/mv below
     # creates the parent first.
-    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet" ".config/Code" ".config/google-chrome")
+    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet" ".config/Code")
 
     for dir in "${heavy_dirs[@]}"; do
         local target_home="$HOME/$dir"
@@ -628,6 +632,148 @@ ext() {
     esac
 }
 
+# Chrome profile backup to a private repository. The profile itself lives in
+# $HOME so it already survives a post change; this is the off-machine copy, for
+# when $HOME is lost or a post is reimaged.
+#
+# Only the files that carry real state are copied. Caches, Extensions, IndexedDB
+# and Service Workers are left out: they are large and Chrome rebuilds them.
+#
+# Every push replaces history with a single commit, so the repository stays the
+# size of the current data instead of growing by the whole profile every time.
+#
+#   gcache save   commit and force-push the current profile
+#   gcache load   restore it onto this machine
+#   gcache list   show what is in the backup
+GCACHE_DIR="$TOOLS/google-cache"
+GCACHE_PROFILE_FILES=(
+    "Bookmarks" "Bookmarks.bak" "Preferences" "Secure Preferences"
+    "History" "Favicons" "Top Sites" "Shortcuts"
+    "Web Data" "Login Data" "Cookies" "Custom Dictionary.txt"
+)
+GCACHE_ROOT_FILES=("Local State" "First Run")
+
+gcache() {
+    if [ -z "$GCACHE_URL" ]; then
+        _info "GCACHE_URL is not set in ~/.42-custom.sh, nothing to do"
+        return 0
+    fi
+
+    local chrome="$HOME/.config/google-chrome"
+
+    # These are live SQLite databases. Copying them while Chrome has them open
+    # gives a corrupt backup.
+    if pgrep -u "$USER" -x chrome > /dev/null 2>&1; then
+        _err "Chrome is running. Close it, then run 'gcache $1' again"
+        return 1
+    fi
+
+    local profile name f
+
+    case "$1" in
+        load)
+            _step "Restoring Chrome profile from $GCACHE_URL"
+            rm -rf "$GCACHE_DIR"
+            _info "cloning..."
+            git clone --depth 1 -q "$GCACHE_URL" "$GCACHE_DIR" || {
+                _err "clone failed"
+                return 1
+            }
+
+            mkdir -p "$chrome"
+            for f in "${GCACHE_ROOT_FILES[@]}"; do
+                [ -e "$GCACHE_DIR/$f" ] && cp -a "$GCACHE_DIR/$f" "$chrome/$f"
+            done
+
+            for profile in "$GCACHE_DIR"/*/; do
+                name="${profile:h:t}"
+                [ "$name" = ".git" ] && continue
+                [ -d "$profile" ] || continue
+                mkdir -p "$chrome/$name"
+                for f in "${GCACHE_PROFILE_FILES[@]}"; do
+                    [ -e "$profile/$f" ] && cp -a "$profile/$f" "$chrome/$name/$f"
+                done
+                _ok "$name restored"
+            done
+            _info "saved passwords and cookies are tied to this machine's keyring,"
+            _info "so Chrome may ask you to sign in again"
+            ;;
+
+        list)
+            _step "Backup contents"
+            rm -rf "$GCACHE_DIR"
+            git clone --depth 1 -q "$GCACHE_URL" "$GCACHE_DIR" 2>/dev/null || {
+                _err "clone failed"
+                return 1
+            }
+            for profile in "$GCACHE_DIR"/*/; do
+                name="${profile:h:t}"
+                [ "$name" = ".git" ] && continue
+                printf '    %-12s %s  bookmarks:%s\n' "$name" \
+                    "$(du -sh "$profile" 2>/dev/null | cut -f1)" \
+                    "$([ -f "$profile/Bookmarks" ] && echo yes || echo NO)"
+            done
+            ;;
+
+        *)
+            if [ ! -d "$chrome" ]; then
+                _err "no Chrome profile at $chrome"
+                return 1
+            fi
+
+            _step "Backing up Chrome profile to $GCACHE_URL"
+
+            rm -rf "$GCACHE_DIR"
+            mkdir -p "$GCACHE_DIR"
+            git -C "$GCACHE_DIR" init -q
+            git -C "$GCACHE_DIR" remote add origin "$GCACHE_URL"
+
+            for f in "${GCACHE_ROOT_FILES[@]}"; do
+                [ -e "$chrome/$f" ] && cp -a "$chrome/$f" "$GCACHE_DIR/$f"
+            done
+
+            local copied=0
+            for profile in "$chrome"/Default "$chrome"/Profile*; do
+                [ -d "$profile" ] || continue
+                name="${profile:t}"
+                mkdir -p "$GCACHE_DIR/$name"
+                for f in "${GCACHE_PROFILE_FILES[@]}"; do
+                    [ -e "$profile/$f" ] && cp -a "$profile/$f" "$GCACHE_DIR/$name/$f"
+                done
+                _ok "$name  $(du -sh "$GCACHE_DIR/$name" 2>/dev/null | cut -f1)"
+                copied=$((copied + 1))
+            done
+
+            if [ "$copied" -eq 0 ]; then
+                _err "found no profiles to back up"
+                return 1
+            fi
+
+            local mb=$(du -sm "$GCACHE_DIR" 2>/dev/null | cut -f1)
+            _info "$copied profile(s), ${mb}M total"
+
+            # One commit, always. Without this the whole profile would be added
+            # to history on every logout and the repository would grow by
+            # hundreds of MB a week.
+            git -C "$GCACHE_DIR" add -A
+            git -C "$GCACHE_DIR" commit -q -m "chrome profile: $(date '+%Y-%m-%d %H:%M:%S') ($(hostname -s))" || {
+                _err "commit failed"
+                return 1
+            }
+            git -C "$GCACHE_DIR" branch -M main
+
+            _info "pushing ${mb}M..."
+            git -C "$GCACHE_DIR" push -f -u origin main 2>&1 | tail -2
+            if [ "${pipestatus[1]}" -eq 0 ]; then
+                _ok "pushed"
+            else
+                _err "push failed"
+                return 1
+            fi
+            ;;
+    esac
+}
+
 mouse() {
     while true; do
         xdotool mousemove_relative -- 1 0
@@ -674,7 +820,7 @@ logout() {
     # Caches nothing below needs. They go first, so the git work further down
     # has room: running out of space in the middle of a push is the one failure
     # here that can actually lose work.
-    local early_drop=(".config/google-chrome" ".config/Code" ".cache" ".copilot" ".dotnet")
+    local early_drop=(".config/Code" ".cache" ".copilot" ".dotnet")
 
     # These wait until after the pushes, because a repository's git hooks may
     # still want node, npm or an editor binary.
@@ -734,6 +880,10 @@ logout() {
     if memo_save; then
         memo_pushed=0
     fi
+
+    # ---- 4b. Back up the Chrome profile. Needs $TOOLS, so it runs before the
+    #          tools are removed below. Skipped if Chrome is still open. ----
+    gcache save || _err "Chrome backup skipped or failed (see above)"
 
     # ---- 5. Free the rest of the caches and the re-downloadable tools. ----
     _step "Freeing the rest"
