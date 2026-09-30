@@ -92,8 +92,12 @@ def cmd_env(conf: cfg.Config, args: argparse.Namespace) -> int:
 
     Only installed tools are added, so a missing one cannot poison PATH.
     """
+    # Dependencies count: flutter pulls in ninja and the Android SDK, and those
+    # are useless if they are installed but never reach PATH.
+    enabled = tools.with_requirements(conf.tools)
+
     entries = []
-    for name in conf.tools:
+    for name in enabled:
         tool = tools.TOOLS.get(name)
         if tool is None:
             continue
@@ -104,12 +108,12 @@ def cmd_env(conf: cfg.Config, args: argparse.Namespace) -> int:
     if entries:
         print(f'export PATH="{":".join(entries)}:$PATH"')
 
-    if "flutter" in conf.tools:
+    if "flutter" in enabled:
         # Dart writes packages to ~/.pub-cache by default, which grows past a
         # gigabyte on the small $HOME disk.
         print(f'export PUB_CACHE="{conf.goinfre}/realocated/.pub-cache"')
 
-    if "android" in conf.tools:
+    if "android" in enabled:
         android = conf.tools_dir / "android"
         print(f'export ANDROID_HOME="{android}"')
         print(f'export ANDROID_SDK_ROOT="{android}"')
