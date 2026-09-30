@@ -75,6 +75,18 @@ def _apply_display(conf: cfg.Config) -> None:
 # commands
 # --------------------------------------------------------------------------
 
+def cmd_update(conf: cfg.Config, args: argparse.Namespace) -> int:
+    """`42 update` - re-read config.sh.
+
+    config.sh intercepts this before Python is reached, because only the shell can
+    re-source itself. This exists so the command appears in `42 --help`, and to say
+    something useful if it is ever called directly.
+    """
+    log.err("run this from your shell, so it can re-source itself:")
+    log.info("  42 update")
+    return 1
+
+
 def cmd_env(conf: cfg.Config, args: argparse.Namespace) -> int:
     """Print the shell exports for config.sh to eval.
 
@@ -424,6 +436,9 @@ def build_parser() -> argparse.ArgumentParser:
     beekeeper = sub.add_parser("beekeeper", help="launch Beekeeper Studio")
     beekeeper.add_argument("args", nargs="*", help="passed through to Beekeeper")
     beekeeper.set_defaults(handler=cmd_beekeeper)
+
+    update = sub.add_parser("update", help="re-read config.sh after editing it")
+    update.set_defaults(handler=cmd_update)
 
     env = sub.add_parser("env", help="print shell exports (used by config.sh)")
     env.set_defaults(handler=cmd_env)
