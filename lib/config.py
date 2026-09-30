@@ -67,6 +67,9 @@ class Config:
     extensions: dict[str, str] = field(default_factory=dict)
     vscode_settings: dict[str, str] = field(default_factory=dict)
     dirs: list[Directory] = field(default_factory=list)
+    #: Android API level to install. Flutter raises its minimum over time, so
+    #: this is a setting rather than a constant in the code.
+    android_api: int = 36
 
     @property
     def goinfre(self) -> Path:
@@ -109,4 +112,5 @@ def load(path: Path = CONFIG_FILE) -> Config:
         extensions=raw.get("extensions", {}),
         vscode_settings=raw.get("vscode", {}).get("settings", {}),
         dirs=[Directory(**entry) for entry in raw.get("dirs", [])],
+        android_api=raw.get("android", {}).get("api_level", 36),
     )

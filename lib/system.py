@@ -6,6 +6,7 @@ modes are visible instead of hidden behind a shell pipeline.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,6 +31,11 @@ def size_mb(path: Path) -> int:
         return 0
     total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
     return total // (1024 * 1024)
+
+
+def can_read_write(path: Path) -> bool:
+    """Whether this user can open `path` for reading and writing."""
+    return os.access(path, os.R_OK | os.W_OK)
 
 
 def is_running(process: str) -> bool:

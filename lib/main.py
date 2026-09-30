@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import android          # noqa: E402
 import browser          # noqa: E402
 import config as cfg    # noqa: E402
 import dirs             # noqa: E402
@@ -151,6 +152,12 @@ def cmd_install(conf: cfg.Config, args: argparse.Namespace) -> int:
     failed = [name for name in wanted
               if not tools.install(tools.TOOLS[name], conf.tools_dir)]
 
+    # Unpacking Android only gives the command-line tools; the SDK itself still
+    # has to be fetched, or flutter reports "Android SDK not found".
+    if "android" in wanted and "android" not in failed:
+        if not android.setup(conf.tools_dir / "android", conf.android_api):
+            failed.append("android SDK")
+
     # Naming a tool means wanting it on every workstation, so remember it.
     if not args.all and args.tools:
         added = [name for name in args.tools if name not in conf.tools]
@@ -265,6 +272,16 @@ def cmd_ext(conf: cfg.Config, args: argparse.Namespace) -> int:
         tomledit.set_table(cfg.CONFIG_FILE, "extensions", updated)
         log.ok("~/42.toml updated")
     return status
+
+
+def cmd_avd(conf: cfg.Config, args: argparse.Namespace) -> int:
+    """`42 avd` - create the Android emulator if needed, then start it."""
+    return 0 if android.create_and_start(
+        conf.tools_dir / "android",
+        conf.tools_dir / "android-home" / "avd",
+        args.name,
+        conf.android_api,
+    ) else 1
 
 
 def cmd_mouse(conf: cfg.Config, args: argparse.Namespace) -> int:
@@ -439,6 +456,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     logout = sub.add_parser("logout", help="push everything, free the disk, wipe goinfre")
     logout.set_defaults(handler=cmd_logout)
+
+    avd = sub.add_parser("avd", help="create and start the Android emulator")
+    avd.add_argument("name", nargs="?", default="")
+    avd.set_defaults(handler=cmd_avd)
 
     mouse = sub.add_parser("mouse", help="nudge the pointer so the session stays awake")
     mouse.set_defaults(handler=cmd_mouse)
