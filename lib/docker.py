@@ -44,14 +44,17 @@ def _running_containers() -> list[str]:
 
 
 def clean() -> int:
-    """Stop everything and prune. Returns MB still used afterwards."""
+    """Stop every container and prune images, volumes and build cache.
+
+    The daemon is asked to report what it reclaimed rather than measuring the
+    directory: overlay2 holds files owned by mapped user ids that this user
+    cannot stat.
+    """
     if not is_available():
         log.info("docker is not running, nothing to clean")
         return 0
 
-    root = data_root()
-    before = system.size_mb(root) if root else 0
-    log.step(f"Cleaning docker ({before}M)")
+    log.step("Cleaning docker")
 
     running = _running_containers()
     if running:
@@ -62,11 +65,12 @@ def clean() -> int:
     # Without both, a machine that is about to be wiped keeps everything.
     log.info("pruning containers, images, volumes and build cache")
     result = system.run(["docker", "system", "prune", "-a", "-f", "--volumes"])
-    for line in result.stdout.strip().splitlines():
-        if line.lower().startswith("total reclaimed"):
-            log.ok(line.strip())
-
-    after = system.size_mb(root) if root else 0
-    if before and after < before:
-        log.ok(f"docker went from {before}M to {after}M")
-    return after
+    reclaimed = [line.strip() for line in result.stdout.splitlines()
+                 if line.lower().startswith("total reclaimed")]
+    if reclaimed:
+        log.ok(reclaimed[0])
+    elif result.returncode != 0:
+        log.err("docker prune failed")
+        for line in result.stderr.strip().splitlines()[-2:]:
+            log.info(line)
+    return 0

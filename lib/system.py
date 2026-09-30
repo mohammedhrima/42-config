@@ -26,10 +26,23 @@ def free_mb(path: Path) -> int:
 
 
 def size_mb(path: Path) -> int:
-    """Size of a directory tree, in MB. Zero when it does not exist."""
+    """Size of a directory tree, in MB. Zero when it does not exist.
+
+    Entries that cannot be read are skipped rather than raising. A container's
+    layers under docker's overlay2 belong to mapped user ids, so walking them as
+    yourself hits PermissionError, and a size used only for a progress message
+    must never abort the work it is reporting on.
+    """
     if not path.exists():
         return 0
-    total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+    total = 0
+    for entry in path.rglob("*"):
+        try:
+            if entry.is_file() and not entry.is_symlink():
+                total += entry.stat().st_size
+        except OSError:
+            continue
     return total // (1024 * 1024)
 
 

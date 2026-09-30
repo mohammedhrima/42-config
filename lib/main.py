@@ -353,11 +353,18 @@ def cmd_logout(conf: cfg.Config, args: argparse.Namespace) -> int:
         pushed[entry.path] = _push(conf, entry)
 
     if conf.browser_repo:
-        browser.save(conf.browser_repo, conf.tools_dir / "browser-backup")
+        try:
+            browser.save(conf.browser_repo, conf.tools_dir / "browser-backup")
+        except Exception as error:                  # noqa: BLE001
+            log.err(f"browser backup failed, continuing: {error}")
 
     # Docker's data root is on goinfre and goes with it, but pruning through the
-    # daemon first frees the space cleanly and says how much.
-    docker.clean()
+    # daemon first frees the space cleanly and says how much. Never let this stop
+    # a logout: the pushes are already done and the wipe still has to happen.
+    try:
+        docker.clean()
+    except Exception as error:                      # noqa: BLE001
+        log.err(f"docker cleanup failed, continuing: {error}")
 
     log.step("Freeing the rest")
     for entry in conf.dirs:
