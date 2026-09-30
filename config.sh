@@ -40,12 +40,29 @@ if [ ! -f "$CUSTOM" ]; then
 # skills). While this stays unset, `memo` does nothing and ~/.claude is left
 # alone, so the rest of the configuration behaves normally.
 # CLAUDE_MEMO_URL="git@github.com:<you>/<your-private-repo>.git"
+
+# Git identity. Without these git invents user@hostname from the workstation,
+# so every post authors commits under a different address.
+# GIT_NAME="<your name>"
+# GIT_EMAIL="<your@email>"
 CUSTOM_EOF
     chmod 600 "$CUSTOM"
     echo "Created $CUSTOM"
 fi
 
 source "$CUSTOM"
+
+# A 42 workstation has no git identity, so git falls back to $USER@$HOST and
+# every post commits under a different email. Set it from ~/.42-custom.sh on
+# every load, so it is correct even on a machine where ~/.gitconfig was lost.
+if [ -n "$GIT_NAME" ] && [ "$(git config --global user.name)" != "$GIT_NAME" ]; then
+    git config --global user.name "$GIT_NAME"
+    echo "git: set user.name to $GIT_NAME"
+fi
+if [ -n "$GIT_EMAIL" ] && [ "$(git config --global user.email)" != "$GIT_EMAIL" ]; then
+    git config --global user.email "$GIT_EMAIL"
+    echo "git: set user.email to $GIT_EMAIL"
+fi
 
 CLAUDE_DIR="$REALOCATED/.claude"
 
@@ -299,7 +316,7 @@ space() {
 
     # An entry may contain a slash (".config/Code"), so every mkdir/mv below
     # creates the parent first.
-    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet" ".config/Code")
+    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet" ".config/Code" ".config/google-chrome")
 
     for dir in "${heavy_dirs[@]}"; do
         local target_home="$HOME/$dir"
@@ -619,10 +636,83 @@ mouse() {
     done
 }
 
+# Free space on the filesystem holding a path, in MB.
+_free_mb() { df -m "$1" 2>/dev/null | tail -1 | awk '{print $4}' }
+
+# Size of a path in MB, or 0 when it does not exist.
+_size_mb() {
+    if [ -e "$1" ]; then
+        du -sm "$1" 2>/dev/null | cut -f1
+    else
+        echo 0
+    fi
+}
+
+# Drop one relocated directory: remove the symlink from $HOME and delete the
+# data on goinfre. Prints how much was freed.
+_drop_relocated() {
+    local dir="$1"
+    local relocated_dir="$2"
+    local link="$HOME/$dir"
+    local data="$relocated_dir/$dir"
+
+    [ -L "$link" ] || return 0
+
+    local freed=$(_size_mb "$data")
+    rm -f "$link"
+    rm -rf "$data"
+    if [ "${freed:-0}" -gt 0 ]; then
+        _ok "$dir dropped, ${freed}M freed"
+    else
+        _info "$dir link removed"
+    fi
+}
+
 logout() {
+    local relocated_dir="/goinfre/$USER/realocated"
+
+    # Caches nothing below needs. They go first, so the git work further down
+    # has room: running out of space in the middle of a push is the one failure
+    # here that can actually lose work.
+    local early_drop=(".config/google-chrome" ".config/Code" ".cache" ".copilot" ".dotnet")
+
+    # These wait until after the pushes, because a repository's git hooks may
+    # still want node, npm or an editor binary.
+    local late_drop=(".vscode" ".vscode-shared" ".npm")
+
+    _step "Logout"
+    _info "\$HOME free: $(_free_mb "$HOME")M    goinfre free: $(_free_mb /goinfre)M"
+
+    # ---- 1. Save the few KB of VS Code settings out of a directory that is
+    #         otherwise all cache, before that directory is deleted. ----
+    local stash="$HOME/.42-stash"
+    rm -rf "$stash"
+    if [ -d "$HOME/.config/Code/User" ]; then
+        mkdir -p "$stash"
+        cp -a "$HOME/.config/Code/User" "$stash/Code-User" 2>/dev/null && \
+            _info "saved VS Code user settings"
+    fi
+
+    # ---- 2. Free the disposable caches now, not at the end. ----
+    _step "Freeing cache before pushing"
+    local dir
+    for dir in "${early_drop[@]}"; do
+        _drop_relocated "$dir" "$relocated_dir"
+    done
+
+    if [ -d "$stash/Code-User" ]; then
+        mkdir -p "$HOME/.config/Code"
+        rm -rf "$HOME/.config/Code/User"
+        cp -a "$stash/Code-User" "$HOME/.config/Code/User" && \
+            _ok "VS Code user settings kept in \$HOME"
+    fi
+    rm -rf "$stash"
+    _info "goinfre free now: $(_free_mb /goinfre)M"
+
+    # ---- 3. Push every workspace repository. ----
     _step "Pushing workspace repositories"
-    # 1. Sync and push all workspace repositories (with null-glob modifier to prevent errors if empty)
     if [ -d "$WORKSPACE_GOINFRE" ]; then
+        local repo
         for repo in "$WORKSPACE_GOINFRE"/*(/N) ; do
             if [ -d "$repo/.git" ]; then
                 cd "$repo" || continue
@@ -637,51 +727,71 @@ logout() {
             fi
         done
     fi
+    cd "$HOME"
 
-    # # 2. Sync and push changes in the 42-config repository
-    # local config_dir="/goinfre/$USER/42-config"
-    # if [ -d "$config_dir/.git" ]; then
-    #     cd "$config_dir" || return 1
-    #     if [[ -n $(git status -s) ]] || [[ -n $(git cherry -v 2>/dev/null) ]]; then
-    #         git add .
-    #         git commit -m "Autosync 42-config on logout: $(date)"
-    #         git push
-    #     fi
-    # fi
+    # ---- 4. Push ~/.claude. ----
+    local memo_pushed=1
+    if memo_save; then
+        memo_pushed=0
+    fi
 
-    # 3. Push the .claude clone. No-op unless CLAUDE_MEMO_URL is set.
-    memo_save
-
-    # 4. Restore heavy files back to $HOME from goinfre before wiping.
-    #    .claude is restored like the rest: if the push above failed, the clone
-    #    is still in $HOME on the next session instead of being wiped, and the
-    #    login token travels with it so there is no login to redo.
-    _step "Restoring directories to \$HOME"
-    local relocated_dir="/goinfre/$USER/realocated"
-    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet" ".config/Code" ".claude")
-
-    for dir in "${heavy_dirs[@]}"; do
-        local target_home="$HOME/$dir"
-        local target_goinfre="$relocated_dir/$dir"
-
-        if [ -L "$target_home" ]; then
-            rm "$target_home"
-            if [ -d "$target_goinfre" ]; then
-                _info "moving $dir back to \$HOME..."
-                mkdir -p "${target_home:h}"
-                mv "$target_goinfre" "$target_home" && _ok "$dir restored"
-            else
-                _info "$dir: link removed, nothing on goinfre to restore"
-            fi
-        fi
+    # ---- 5. Free the rest of the caches and the re-downloadable tools. ----
+    _step "Freeing the rest"
+    for dir in "${late_drop[@]}"; do
+        _drop_relocated "$dir" "$relocated_dir"
     done
+    if [ -d "$TOOLS" ]; then
+        _info "removing $TOOLS ($(_size_mb "$TOOLS")M, all re-downloadable)..."
+        rm -rf "$TOOLS"
+        _ok "tools removed"
+    fi
+    _info "goinfre free now: $(_free_mb /goinfre)M"
+
+    # ---- 6. ~/.claude is the only thing that cannot be rebuilt, so it is
+    #         handled last, once the disk is as empty as it will get. ----
+    _step "Handling ~/.claude"
+    local cdir="$relocated_dir/.claude"
+    if [ -L "$HOME/.claude" ] && [ -d "$cdir" ]; then
+        local need=$(_size_mb "$cdir")
+        local have=$(_free_mb "$HOME")
+
+        if [ "${have:-0}" -gt $(( ${need:-0} + 300 )) ]; then
+            rm -f "$HOME/.claude"
+            _info "moving .claude to \$HOME (${need}M into ${have}M free)..."
+            if mv "$cdir" "$HOME/.claude"; then
+                _ok ".claude kept in \$HOME, no clone needed next session"
+            else
+                _err "move failed, leaving it on goinfre"
+                rm -rf "$HOME/.claude"
+                ln -s "$cdir" "$HOME/.claude"
+                if [ "$memo_pushed" -ne 0 ]; then
+                    _err "and it was NOT pushed. Not wiping goinfre."
+                    return 1
+                fi
+            fi
+        elif [ "$memo_pushed" -eq 0 ]; then
+            # Safe to delete: it is on the remote, and .credentials.json is
+            # tracked there too, so the next clone brings the login back.
+            rm -f "$HOME/.claude"
+            rm -rf "$cdir"
+            _info "\$HOME has ${have}M free, .claude needs ${need}M"
+            _ok "already pushed, so it will be cloned again next session"
+        else
+            _err "push FAILED and \$HOME has only ${have}M free for ${need}M"
+            _err "goinfre will NOT be wiped, your conversations are still in $cdir"
+            _err "free space in \$HOME, then run: memo_save"
+            return 1
+        fi
+    fi
+
+    # ---- 7. Wipe what is left. ----
+    if [ -e "$cdir" ]; then
+        _err "$cdir still exists, refusing to wipe goinfre"
+        return 1
+    fi
 
     _step "Wiping goinfre"
-    # 5. Wipe temporary goinfre runtime storage
-    _info "removing tools, 42-config, workspace and realocated..."
-    rm -rf "$TOOLS"
-    rm -rf "$CONFIG"
-    rm -rf "$WORKSPACE_GOINFRE"
-    rm -rf "$relocated_dir"
-    _ok "goinfre clean. Safe to log out."
+    cd "$HOME"
+    rm -rf "$TOOLS" "$CONFIG" "$WORKSPACE_GOINFRE" "$relocated_dir"
+    _ok "goinfre clean. \$HOME free: $(_free_mb "$HOME")M. Safe to log out."
 }
