@@ -423,23 +423,57 @@ def _push(conf: cfg.Config, entry: cfg.Directory) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="42",
-        description="Development environment for a 42 workstation. "
-                    "Settings live in ~/42.toml.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Development environment for a 42 workstation.\n"
+                    "Settings live in ~/42.toml. Run `42 <command> --help` for "
+                    "details on any command.",
+        epilog="Typical use:\n"
+               "  42 space                 once per session, after logging in\n"
+               "  42 install flutter       add a tool and remember it\n"
+               "  42 add <url> workspace/x clone a repository\n"
+               "  logout                   at the end of the session\n",
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
-    install = sub.add_parser("install", help="download tools into goinfre")
-    install.add_argument("tools", nargs="*", help=f"any of: {', '.join(tools.TOOLS)}")
+    tool_list = ", ".join(tools.TOOLS)
+    install = sub.add_parser(
+        "install",
+        help="download tools into goinfre (no arguments: everything in ~/42.toml)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Download tools into /goinfre/$USER/tools.\n\n"
+                    "Naming a tool also adds it to ~/42.toml, so the next\n"
+                    "workstation installs it too. Tools already present are\n"
+                    "left alone. Some tools pull in others: flutter needs\n"
+                    "ninja to build for Linux and the Android SDK to build\n"
+                    "for Android, so both are installed with it.",
+        epilog=f"available tools:\n  {tool_list}\n\n"
+               "examples:\n"
+               "  42 install               everything listed in ~/42.toml\n"
+               "  42 install --all         the same, said explicitly\n"
+               "  42 install uv node       just these two, and remember them\n"
+               "  42 install flutter       flutter, plus ninja and the Android SDK\n",
+    )
+    install.add_argument("tools", nargs="*", metavar="TOOL",
+                         help=f"one or more of: {tool_list}")
     install.add_argument("--all", action="store_true",
-                         help="install everything listed in ~/42.toml")
+                         help="install everything listed in ~/42.toml (the default)")
     install.set_defaults(handler=cmd_install)
 
-    space = sub.add_parser("space", help="relocate directories and set up this workstation")
+    space = sub.add_parser(
+        "space",
+        help="set up this workstation: links, repos, extensions, settings",
+        description="Create every directory in ~/42.toml, clone what has a url, "
+                    "symlink what has a link, apply your git identity, display "
+                    "settings and VS Code extensions. Safe to run repeatedly.")
     space.add_argument("--prefer-local", nargs="*", default=[], metavar="FILE",
                        help="files where this machine's copy wins over the repository's")
     space.set_defaults(handler=cmd_space)
 
-    add = sub.add_parser("add", help="register a repository and clone it")
+    add = sub.add_parser(
+        "add",
+        help="register a repository in ~/42.toml and clone it",
+        description="Add a [[dirs]] entry and set it up now. PATH is relative "
+                    "to /goinfre/$USER, for example workspace/my-project.")
     add.add_argument("url")
     add.add_argument("path", help="where to put it, relative to goinfre")
     add.add_argument("--link", help="symlink this $HOME path to it")
@@ -447,21 +481,39 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--guard", help="process that must not run while it is moved")
     add.set_defaults(handler=cmd_add)
 
-    ext = sub.add_parser("ext", help="VS Code extensions")
+    ext = sub.add_parser(
+        "ext",
+        help="VS Code extensions: sync (default), add, rm, save, list",
+        description="Without an action, installs everything listed in ~/42.toml "
+                    "and applies your [vscode.settings].")
     ext.add_argument("action", nargs="?", default="sync",
                      choices=["sync", "add", "rm", "remove", "save", "list"])
     ext.add_argument("name", nargs="?", help="publisher.extension")
     ext.set_defaults(handler=cmd_ext)
 
-    gcache = sub.add_parser("gcache", help="Chrome profile backup")
+    gcache = sub.add_parser(
+        "gcache",
+        help="Chrome profile backup: save (default), load, list",
+        description="Back the Chrome profile up to the repository in "
+                    "[browser] backup_repo. Chrome must be closed: these are "
+                    "live databases.")
     gcache.add_argument("action", nargs="?", default="save",
                         choices=["save", "load", "list"])
     gcache.set_defaults(handler=cmd_gcache)
 
-    logout = sub.add_parser("logout", help="push everything, free the disk, wipe goinfre")
+    logout = sub.add_parser(
+        "logout",
+        help="push everything, free the disk, wipe goinfre",
+        description="Push every repository, back up the browser, clean docker, "
+                    "carry `keep` directories into $HOME, then wipe goinfre. "
+                    "Refuses to wipe if something unpushed does not fit in $HOME.")
     logout.set_defaults(handler=cmd_logout)
 
-    avd = sub.add_parser("avd", help="create and start the Android emulator")
+    avd = sub.add_parser(
+        "avd",
+        help="create and start the Android emulator",
+        description="Install the emulator and a system image if needed, create "
+                    "the device, then start it. The system image is several GB.")
     avd.add_argument("name", nargs="?", default="")
     avd.set_defaults(handler=cmd_avd)
 
