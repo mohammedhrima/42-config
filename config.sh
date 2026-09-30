@@ -297,7 +297,9 @@ space() {
 
     _step "Relocating heavy directories to $relocated_dir"
 
-    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet")
+    # An entry may contain a slash (".config/Code"), so every mkdir/mv below
+    # creates the parent first.
+    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet" ".config/Code")
 
     for dir in "${heavy_dirs[@]}"; do
         local target_home="$HOME/$dir"
@@ -306,6 +308,7 @@ space() {
         # If it's a real directory in home (and not already a symlink)
         if [ -d "$target_home" ] && [ ! -L "$target_home" ]; then
             _info "moving $dir ($(du -sh "$target_home" 2>/dev/null | cut -f1)) to goinfre..."
+            mkdir -p "${target_goinfre:h}"
             # If target in goinfre already exists, merge contents or remove conflict
             if [ -d "$target_goinfre" ]; then
                 cp -rn "$target_home/"* "$target_goinfre/" 2>/dev/null
@@ -457,6 +460,157 @@ beekeeper() {
     "$BEEKEEPER_PATH/AppRun" "$@" > /dev/null 2>&1 &!
 }
 
+EXTENSIONS_TOML="$HOME/extensions.toml"
+
+# Set one key in VS Code's settings.json. That file is JSONC: it allows comments
+# and trailing commas, so it is edited as text. Parsing and rewriting it as JSON
+# would silently delete every comment in it.
+_vscode_setting() {
+    local key="$1"
+    local value="$2"
+    local f="$HOME/.config/Code/User/settings.json"
+
+    mkdir -p "${f:h}"
+    [ -f "$f" ] || echo '{}' > "$f"
+
+    VS_KEY="$key" VS_VAL="$value" VS_FILE="$f" python3 <<'PYEOF'
+import os, re
+key, val, path = os.environ["VS_KEY"], os.environ["VS_VAL"], os.environ["VS_FILE"]
+lines = open(path).readlines()
+pat = re.compile(r'^(\s*)"' + re.escape(key) + r'"(\s*:\s*)"[^"]*"(.*)$')
+for i, line in enumerate(lines):
+    if line.lstrip().startswith("//"):
+        continue
+    m = pat.match(line)
+    if m:
+        new = '%s"%s"%s"%s"%s\n' % (m.group(1), key, m.group(2), val, m.group(3))
+        if new == line:
+            print("    %s already set to %s" % (key, val))
+        else:
+            lines[i] = new
+            open(path, "w").writelines(lines)
+            print("    [ok] %s = %s" % (key, val))
+        break
+else:
+    for i, line in enumerate(lines):
+        if "{" in line:
+            lines.insert(i + 1, '  "%s": "%s",\n' % (key, val))
+            open(path, "w").writelines(lines)
+            print("    [ok] %s = %s (added)" % (key, val))
+            break
+PYEOF
+}
+
+# VS Code extensions, tracked in ~/extensions.toml exactly the way repos.toml
+# tracks repositories: the file lives in $HOME so it survives the goinfre wipe,
+# and the extensions themselves land in ~/.vscode/extensions, which `space`
+# already relocated to goinfre.
+#
+#   ext              install everything listed, then apply the theme
+#   ext add <id>     add one extension to the list and install it
+#   ext rm <id>      drop one from the list (does not uninstall it)
+#   ext save         overwrite the list with whatever is installed right now
+#   ext list         show which listed extensions are installed
+ext() {
+    local code_bin="$VSCODE_BIN/code"
+
+    if [ ! -x "$code_bin" ]; then
+        _err "vscode is not installed, run 'install' first"
+        return 1
+    fi
+
+    if [ ! -f "$EXTENSIONS_TOML" ]; then
+        _info "creating $EXTENSIONS_TOML"
+        echo "[extensions]" > "$EXTENSIONS_TOML"
+    fi
+
+    local name id installed lower
+
+    case "$1" in
+        add)
+            shift
+            if [ -z "$1" ]; then
+                _err "usage: ext add <publisher.extension>"
+                return 1
+            fi
+            id="$1"
+            name="${2:-${id##*.}}"
+            if grep -qi "\"$id\"" "$EXTENSIONS_TOML"; then
+                _info "$id already listed"
+            else
+                echo "$name = \"$id\"" >> "$EXTENSIONS_TOML"
+                _ok "added $id to $EXTENSIONS_TOML"
+            fi
+            _step "Installing $id"
+            "$code_bin" --install-extension "$id" --force 2>&1 | sed 's/^/    /'
+            ;;
+
+        rm)
+            shift
+            if [ -z "$1" ]; then
+                _err "usage: ext rm <publisher.extension>"
+                return 1
+            fi
+            grep -vi "\"$1\"" "$EXTENSIONS_TOML" > "$EXTENSIONS_TOML.tmp" && \
+                mv "$EXTENSIONS_TOML.tmp" "$EXTENSIONS_TOML"
+            _ok "$1 removed from the list"
+            _info "still installed. To remove it: code --uninstall-extension $1"
+            ;;
+
+        save)
+            _step "Saving installed extensions to $EXTENSIONS_TOML"
+            echo "[extensions]" > "$EXTENSIONS_TOML"
+            for id in $("$code_bin" --list-extensions 2>/dev/null); do
+                echo "${id##*.} = \"$id\"" >> "$EXTENSIONS_TOML"
+                _info "$id"
+            done
+            _ok "saved"
+            ;;
+
+        list)
+            _step "Extensions listed in $EXTENSIONS_TOML"
+            installed=$("$code_bin" --list-extensions 2>/dev/null | tr 'A-Z' 'a-z')
+            while IFS='=' read -r name id; do
+                name=$(echo "$name" | xargs)
+                id=$(echo "$id" | xargs | tr -d '"')
+                [[ -z "$name" || "$name" == \[* || "$name" == \#* ]] && continue
+                lower=$(echo "$id" | tr 'A-Z' 'a-z')
+                if echo "$installed" | grep -qx "$lower"; then
+                    _ok "$id"
+                else
+                    _info "$id  NOT INSTALLED"
+                fi
+            done < "$EXTENSIONS_TOML"
+            ;;
+
+        *)
+            _step "Installing extensions from $EXTENSIONS_TOML"
+            installed=$("$code_bin" --list-extensions 2>/dev/null | tr 'A-Z' 'a-z')
+            while IFS='=' read -r name id; do
+                name=$(echo "$name" | xargs)
+                id=$(echo "$id" | xargs | tr -d '"')
+                [[ -z "$name" || "$name" == \[* || "$name" == \#* ]] && continue
+
+                lower=$(echo "$id" | tr 'A-Z' 'a-z')
+                if echo "$installed" | grep -qx "$lower"; then
+                    _info "$id already installed"
+                else
+                    _info "installing $id ..."
+                    if "$code_bin" --install-extension "$id" --force > /dev/null 2>&1; then
+                        _ok "$id"
+                    else
+                        _err "$id failed to install"
+                    fi
+                fi
+            done < "$EXTENSIONS_TOML"
+
+            _step "Applying theme"
+            _vscode_setting "workbench.colorTheme" "One Dark Pro Night Flat"
+            _vscode_setting "workbench.iconTheme" "material-icon-theme"
+            ;;
+    esac
+}
+
 mouse() {
     while true; do
         xdotool mousemove_relative -- 1 0
@@ -504,7 +658,7 @@ logout() {
     #    login token travels with it so there is no login to redo.
     _step "Restoring directories to \$HOME"
     local relocated_dir="/goinfre/$USER/realocated"
-    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet" ".claude")
+    local heavy_dirs=(".cache" ".npm" ".vscode" ".vscode-shared" ".copilot" ".dotnet" ".config/Code" ".claude")
 
     for dir in "${heavy_dirs[@]}"; do
         local target_home="$HOME/$dir"
@@ -514,6 +668,7 @@ logout() {
             rm "$target_home"
             if [ -d "$target_goinfre" ]; then
                 _info "moving $dir back to \$HOME..."
+                mkdir -p "${target_home:h}"
                 mv "$target_goinfre" "$target_home" && _ok "$dir restored"
             else
                 _info "$dir: link removed, nothing on goinfre to restore"
