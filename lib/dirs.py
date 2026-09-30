@@ -131,6 +131,9 @@ def realize(config: Config, entry: Directory, prefer_local: list[str] | None = N
             if not _clone(entry, target):
                 return False
             if not _build(entry, target):
+                # Leave nothing half-built: a directory that exists is treated as
+                # done on the next run, so the build would never be retried.
+                shutil.rmtree(target, ignore_errors=True)
                 return False
         else:
             target.mkdir(parents=True, exist_ok=True)

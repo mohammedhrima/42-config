@@ -9,6 +9,7 @@ and environment, and that is all it is kept for.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -211,16 +212,37 @@ def cmd_add(conf: cfg.Config, args: argparse.Namespace) -> int:
     return 0 if dirs.realize(fresh, entry_obj) else 1
 
 
+def _prepend_tools_to_path(conf: cfg.Config) -> None:
+    """Put the installed tools on PATH for anything this process starts.
+
+    A repository's build step runs as a child of this process, so without this it
+    would find the system's own node or python instead of the ones just
+    installed, which on a 42 workstation are years older.
+    """
+    entries = []
+    for name in tools.with_requirements(conf.tools):
+        tool = tools.TOOLS.get(name)
+        if tool is not None and tool.bin_path(conf.tools_dir).is_dir():
+            entries.append(str(tool.bin_path(conf.tools_dir)))
+    if entries:
+        os.environ["PATH"] = ":".join(entries) + ":" + os.environ.get("PATH", "")
+
+
 def cmd_space(conf: cfg.Config, args: argparse.Namespace) -> int:
     """`42 space` - put everything where it belongs on this workstation."""
     _apply_git_identity(conf)
     _apply_display(conf)
 
+    # Tools come first: a repository below may have a build step that needs them,
+    # and on a fresh workstation nothing is installed yet.
+    failed_tools = cmd_install(conf, argparse.Namespace(tools=[], all=True))
+    _prepend_tools_to_path(conf)
+
     log.step(f"Setting up directories on {conf.goinfre}")
     conf.tools_dir.mkdir(parents=True, exist_ok=True)
     conf.tools_dir.chmod(0o700)
 
-    failed = 0
+    failed = failed_tools
     for entry in conf.dirs:
         if not dirs.realize(conf, entry, prefer_local=args.prefer_local):
             failed += 1
@@ -319,6 +341,7 @@ def cmd_logout(conf: cfg.Config, args: argparse.Namespace) -> int:
     Order matters. Caches are dropped before anything is pushed, because running
     out of space in the middle of a push is the one failure here that loses work.
     """
+    _apply_git_identity(conf)
     log.step("Logout")
     log.info(f"$HOME free: {system.free_mb(Path.home())}M    "
              f"goinfre free: {system.free_mb(conf.goinfre)}M")
@@ -352,11 +375,22 @@ def cmd_logout(conf: cfg.Config, args: argparse.Namespace) -> int:
     for entry in repos:
         pushed[entry.path] = _push(conf, entry)
 
+    failed_repos = [entry for entry in repos if not pushed[entry.path]]
+    if failed_repos:
+        for entry in failed_repos:
+            log.err(f"{entry.name} was not pushed")
+        log.err("logout stopped before removing repositories or wiping goinfre")
+        log.info("Fix the git error, then run 42 logout again")
+        return 1
+
     if conf.browser_repo:
         try:
-            browser.save(conf.browser_repo, conf.tools_dir / "browser-backup")
+            if not browser.save(conf.browser_repo, conf.tools_dir / "browser-backup"):
+                log.err("browser backup failed; goinfre was not wiped")
+                return 1
         except Exception as error:                  # noqa: BLE001
-            log.err(f"browser backup failed, continuing: {error}")
+            log.err(f"browser backup failed; goinfre was not wiped: {error}")
+            return 1
 
     # Docker's data root is on goinfre and goes with it, but pruning through the
     # daemon first frees the space cleanly and says how much. Never let this stop
@@ -403,23 +437,52 @@ def _push(conf: cfg.Config, entry: cfg.Directory) -> bool:
     """Commit and push one repository. True when the remote has everything."""
     repo = conf.resolve(entry)
     if not (repo / ".git").is_dir():
+        log.err(f"{entry.name}: no git checkout at {repo}")
         return False
 
-    dirty = system.git(["status", "--porcelain"], repo).stdout.strip()
+    status = system.git(["status", "--porcelain"], repo)
+    if status.returncode != 0:
+        detail = status.stderr.strip().splitlines()
+        log.err(f"{entry.name}: git status failed: {detail[-1] if detail else 'unknown error'}")
+        return False
+    dirty = status.stdout.strip()
     if dirty:
         log.info(f"committing {entry.name}")
-        system.git(["add", "-A"], repo)
-        system.git(["commit", "-q", "-m", "autosync on logout"], repo)
+        added = system.git(["add", "-A"], repo)
+        if added.returncode != 0:
+            detail = added.stderr.strip().splitlines()
+            log.err(f"{entry.name}: git add failed: {detail[-1] if detail else 'unknown error'}")
+            return False
+        committed = system.git(["commit", "-q", "-m", "autosync on logout"], repo)
+        if committed.returncode != 0:
+            detail = committed.stderr.strip().splitlines()
+            log.err(f"{entry.name}: git commit failed: {detail[-1] if detail else 'unknown error'}")
+            return False
+
+    status = system.git(["status", "--porcelain"], repo)
+    if status.returncode != 0:
+        detail = status.stderr.strip().splitlines()
+        log.err(f"{entry.name}: git status failed: {detail[-1] if detail else 'unknown error'}")
+        return False
+    if status.stdout.strip():
+        log.err(f"{entry.name}: working tree is still dirty; not marking it as pushed")
+        return False
 
     if not system.git_succeeds(["rev-parse", "@{u}"], repo):
         log.info(f"{entry.name} has no upstream, skipping")
         return False
 
-    system.git(["pull", "--rebase", "--autostash"], repo)
-    if system.git_succeeds(["push"], repo):
+    pulled = system.git(["pull", "--rebase", "--autostash"], repo)
+    if pulled.returncode != 0:
+        detail = pulled.stderr.strip().splitlines()
+        log.err(f"{entry.name}: pull failed: {detail[-1] if detail else 'unknown error'}")
+        return False
+    pushed = system.git(["push"], repo)
+    if pushed.returncode == 0:
         log.ok(f"{entry.name} pushed")
         return True
-    log.err(f"{entry.name} push FAILED")
+    detail = pushed.stderr.strip().splitlines()
+    log.err(f"{entry.name}: push failed: {detail[-1] if detail else 'unknown error'}")
     return False
 
 
@@ -513,7 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="push everything, free the disk, wipe goinfre",
         description="Push every repository, back up the browser, clean docker, "
                     "carry `keep` directories into $HOME, then wipe goinfre. "
-                    "Refuses to wipe if something unpushed does not fit in $HOME.")
+                    "Stops before wiping if any repository or browser backup fails.")
     logout.set_defaults(handler=cmd_logout)
 
     avd = sub.add_parser(
@@ -541,6 +604,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str]) -> int:
+    try:
+        cfg.ensure_file()
+    except OSError as error:
+        log.err(f"cannot create {cfg.CONFIG_FILE}: {error}")
+        return 1
+
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "handler", None):

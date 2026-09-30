@@ -80,7 +80,7 @@ Run `42 --help` for the current list.
 
 ## `~/42.toml`
 
-Created on first run. It is the only file you edit.
+Created by the first 42 command if it does not exist. The starter config enables VS Code, Node.js and uv. It is the only file you edit.
 
 ```toml
 [git]
@@ -181,9 +181,10 @@ The order matters and is not obvious.
 7. Move every `keep` directory into `$HOME`, checking there is room first.
 8. Wipe `/goinfre`, Docker's data root included.
 
-If something is **not pushed and does not fit in `$HOME`**, it stops at step 7,
-leaves your data on `/goinfre`, and tells you so. It will not wipe a disk holding
-the only copy of something.
+If a repository or configured browser backup cannot be pushed, logout stops
+before it removes repository copies or wipes `/goinfre`. Fix the git problem,
+then run `42 logout` again. Caches dropped earlier in logout can be rebuilt by
+their applications.
 
 **Docker is wiped.** Images, containers and named volumes all go. They live on
 `/goinfre`, so they were never going to survive changing post anyway, but note

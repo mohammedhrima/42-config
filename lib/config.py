@@ -17,6 +17,42 @@ from pathlib import Path
 
 CONFIG_FILE = Path.home() / "42.toml"
 
+STARTER_CONFIG = """# Personal settings for 42-config.
+
+[git]
+name = ""
+email = ""
+
+[display]
+resolution = ""
+output = ""
+gnome_tweaks = false
+
+[tools]
+# These tools are installed by 42 space on each workstation.
+enabled = ["code", "node", "uv"]
+
+[android]
+api_level = 36
+
+[browser]
+backup_repo = ""
+
+[extensions]
+
+[vscode.settings]
+"workbench.colorTheme" = "Default Dark Modern"
+"""
+
+
+def ensure_file(path: Path = CONFIG_FILE) -> None:
+    """Create the starter config once, without overwriting a file made meanwhile."""
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(STARTER_CONFIG)
+    except FileExistsError:
+        pass
+
 
 @dataclass(frozen=True)
 class Directory:
@@ -90,8 +126,7 @@ class Config:
 
 def load(path: Path = CONFIG_FILE) -> Config:
     """Read ~/42.toml, using defaults for anything absent."""
-    if not path.exists():
-        return Config()
+    ensure_file(path)
 
     with path.open("rb") as handle:
         raw = tomllib.load(handle)

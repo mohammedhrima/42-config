@@ -33,6 +33,15 @@ eval "$(python3 "$CONFIG/lib/main.py" env)"
             # Re-reads this file, which only a sourced script can do.
             source "$CONFIG/config.sh"
             ;;
+        install|space)
+            # These can install tools that were missing when this shell started,
+            # so pick up the new paths instead of making you open a new terminal.
+            python3 "$CONFIG/lib/main.py" "$@"
+            local status=$?
+            eval "$(python3 "$CONFIG/lib/main.py" env)"
+            rehash
+            return $status
+            ;;
         *)
             python3 "$CONFIG/lib/main.py" "$@"
             ;;
