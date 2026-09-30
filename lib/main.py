@@ -21,6 +21,7 @@ import android          # noqa: E402
 import browser          # noqa: E402
 import config as cfg    # noqa: E402
 import dirs             # noqa: E402
+import docker           # noqa: E402
 import extensions       # noqa: E402
 import log              # noqa: E402
 import system           # noqa: E402
@@ -354,6 +355,10 @@ def cmd_logout(conf: cfg.Config, args: argparse.Namespace) -> int:
     if conf.browser_repo:
         browser.save(conf.browser_repo, conf.tools_dir / "browser-backup")
 
+    # Docker's data root is on goinfre and goes with it, but pruning through the
+    # daemon first frees the space cleanly and says how much.
+    docker.clean()
+
     log.step("Freeing the rest")
     for entry in conf.dirs:
         if entry.link and not entry.keep and entry.is_repo:
@@ -382,8 +387,7 @@ def cmd_logout(conf: cfg.Config, args: argparse.Namespace) -> int:
 
     log.step("Wiping goinfre")
     for child in sorted(conf.goinfre.iterdir()):
-        if child.name != "docker":       # not ours to delete
-            shutil.rmtree(child, ignore_errors=True)
+        shutil.rmtree(child, ignore_errors=True)
     log.ok(f"goinfre clean. $HOME free: {system.free_mb(Path.home())}M. Safe to log out.")
     return 0
 

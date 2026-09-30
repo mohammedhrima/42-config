@@ -176,15 +176,18 @@ The order matters and is not obvious.
    the middle of a push is the one failure here that loses work.
 3. Push every registered repository.
 4. Back up the browser profile, if configured.
-5. Delete the remaining caches and the tools, which are all re-downloadable.
-6. Move every `keep` directory into `$HOME`, checking there is room first.
-7. Wipe `/goinfre`.
+5. Stop every container and prune Docker's images, volumes and build cache.
+6. Delete the remaining caches and the tools, which are all re-downloadable.
+7. Move every `keep` directory into `$HOME`, checking there is room first.
+8. Wipe `/goinfre`, Docker's data root included.
 
-If something is **not pushed and does not fit in `$HOME`**, it stops at step 6,
+If something is **not pushed and does not fit in `$HOME`**, it stops at step 7,
 leaves your data on `/goinfre`, and tells you so. It will not wipe a disk holding
 the only copy of something.
 
-`docker/` is never deleted.
+**Docker is wiped.** Images, containers and named volumes all go. They live on
+`/goinfre`, so they were never going to survive changing post anyway, but note
+that a volume holding something you care about is destroyed. Copy it out first.
 
 ---
 
