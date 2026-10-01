@@ -1,0 +1,1408 @@
+#!/usr/bin/python3
+"""42: a session runner for 42 workstations.
+
+$HOME is small and follows you between workstations; /goinfre is large but
+belongs to one machine and is wiped. Everything this runner does is described
+in ~/42.yml: the tools to install, the folders to move out of $HOME, the repos
+to clone at login and push at logout, and the order of every step. This file
+only knows how to read that description and carry it out.
+"""
+
+import os
+import select
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import termios
+import tty
+from dataclasses import dataclass, field
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("42 needs PyYAML for /usr/bin/python3. Install it with: "
+             "sudo apt install python3-yaml")
+
+
+CONFIG_FILE = Path.home() / "42.yml"
+EXAMPLE_FILE = Path(__file__).resolve().parent / "42.example.yml"
+
+
+# --------------------------------------------------------------------------
+# Colours and terminal output
+# --------------------------------------------------------------------------
+
+def _style(code: str) -> str:
+    return f"\x1b[{code}m"
+
+
+RESET = _style("0")
+BOLD = _style("1")
+GRAY = _style("38;5;244")
+WHITE = _style("38;5;255")
+CYAN = _style("38;5;81")
+GREEN = _style("38;5;114")
+YELLOW = _style("38;5;221")
+RED = _style("38;5;203")
+CURSOR_ROW = _style("48;5;236")           # background of the row under the cursor
+BADGE = _style("1;38;5;235;48;5;81")      # " 42 " in dark text on cyan
+
+HIDE_CURSOR = "\x1b[?25l"
+SHOW_CURSOR = "\x1b[?25h"
+CLEAR_BELOW = "\x1b[J"
+
+
+def _width() -> int:
+    """Usable terminal width. One column is kept free so lines never wrap."""
+    return shutil.get_terminal_size().columns - 1
+
+
+def _height() -> int:
+    return shutil.get_terminal_size().lines
+
+
+def _line(pieces: list, background: str = "", cut: bool = True) -> str:
+    """Join (text, style) pieces into one line, cut to the terminal width.
+
+    Cutting is done on the plain text, before colours are added, so a long
+    line can never wrap and break the picker's redraw. Messages that must be
+    read in full pass cut=False.
+    """
+    width = _width() if cut else sys.maxsize
+    used = 0
+    line = ""
+    for text, style in pieces:
+        text = text[:max(0, width - used)]
+        used += len(text)
+        line += background + style + text + RESET
+    if background:
+        line += background + " " * max(0, width - used) + RESET
+    return line
+
+
+def intro(text: str) -> None:
+    """The opening line, before the first prompt."""
+    print(_line([("┌  ", GRAY), (" 42 ", BADGE), ("  " + text, WHITE)]))
+    print(_line([("│", GRAY)]))
+
+
+def outro(text: str, style: str = GREEN) -> None:
+    """The closing line, after the last prompt."""
+    print(_line([("└  ", GRAY), (text, style)]))
+
+
+def fail(title: str, problems: list, hint: str) -> None:
+    """Print a list of problems and stop with exit code 1."""
+    print(_line([("■  ", RED), (title, BOLD + RED)], cut=False), file=sys.stderr)
+    for problem in problems:
+        print(_line([("│  ", GRAY), (problem, WHITE)], cut=False), file=sys.stderr)
+    print(_line([("└  ", GRAY), (hint, GRAY)], cut=False), file=sys.stderr)
+    sys.exit(1)
+
+
+# --------------------------------------------------------------------------
+# Picker: the checkbox prompt shown at login
+# --------------------------------------------------------------------------
+
+@dataclass
+class Choice:
+    """One line in the picker."""
+
+    name: str
+    detail: str = ""                      # shown in gray, e.g. the dest folder
+    needs: list = field(default_factory=list)
+    tag: str = ""                         # shown in green, e.g. "installed"
+
+
+def _summary(title: str, picked: list) -> list:
+    """What a prompt collapses to after enter."""
+    names = ", ".join(picked) if picked else "nothing"
+    # Not cut to the terminal width: nothing is redrawn after this, and every
+    # pick should be readable.
+    return [
+        _line([("◇  ", GREEN), (title, WHITE)]),
+        _line([("│  ", GRAY), (names, GRAY)], cut=False),
+        _line([("│", GRAY)]),
+    ]
+
+
+def _cancelled(title: str) -> list:
+    return [
+        _line([("■  ", RED), (title, WHITE)]),
+        _line([("│  ", GRAY), ("cancelled", RED)]),
+    ]
+
+
+def _screen(title: str, choices: list, checked: list, cursor: int, top: int,
+            visible: int) -> list:
+    """Every line of the open prompt, as it should look right now."""
+    name_width = max(len(c.name) for c in choices) + 2
+    detail_width = max(len(c.detail) for c in choices) + 2
+
+    count = f"  {sum(checked)} of {len(choices)}"
+    lines = [_line([("◆  ", CYAN), (title, BOLD + CYAN), (count, GRAY)])]
+
+    if top > 0:
+        lines.append(_line([("│     ", GRAY), (f"↑ {top} more", GRAY)]))
+
+    for index in range(top, min(top + visible, len(choices))):
+        choice = choices[index]
+        here = index == cursor
+
+        pieces = [("│  ", GRAY)]
+        pieces.append(("❯ " if here else "  ", CYAN))
+        pieces.append(("◼ " if checked[index] else "◻ ",
+                       GREEN if checked[index] else GRAY))
+        name_style = BOLD + WHITE if here else (WHITE if checked[index] else GRAY)
+        pieces.append((choice.name.ljust(name_width), name_style))
+        if choice.detail:
+            pieces.append((choice.detail.ljust(detail_width), GRAY))
+        if choice.needs:
+            pieces.append(("+ " + ", ".join(choice.needs) + "  ", YELLOW))
+        if choice.tag:
+            pieces.append((choice.tag, GREEN))
+
+        lines.append(_line(pieces, CURSOR_ROW if here else ""))
+
+    hidden_below = len(choices) - (top + visible)
+    if hidden_below > 0:
+        lines.append(_line([("│     ", GRAY), (f"↓ {hidden_below} more", GRAY)]))
+
+    lines.append(_line([
+        ("└  ", GRAY),
+        ("↑/↓", WHITE), (" move   ", GRAY),
+        ("space", WHITE), (" toggle   ", GRAY),
+        ("a", WHITE), (" all   ", GRAY),
+        ("enter", WHITE), (" confirm", GRAY),
+    ]))
+    return lines
+
+
+UP = (b"\x1b[A", b"k")
+DOWN = (b"\x1b[B", b"j")
+TOGGLE = (b" ",)
+ALL = (b"a",)
+CONFIRM = (b"\r", b"\n")
+
+
+def _read_key(fd: int) -> bytes:
+    """One key press. Arrow keys arrive as three bytes starting with ESC."""
+    key = os.read(fd, 1)
+    if key == b"\x1b":
+        ready, _, _ = select.select([fd], [], [], 0.05)
+        if ready:
+            key += os.read(fd, 2)
+    return key
+
+
+def choose(title: str, choices: list) -> list:
+    """Show a checkbox prompt and return the picked names, in their order.
+
+    Every box starts checked. Ctrl-C restores the terminal and raises
+    KeyboardInterrupt, so the caller can stop cleanly.
+    """
+    if not choices:
+        for line in _summary(title, []):
+            print(line)
+        return []
+
+    checked = [True] * len(choices)
+    cursor = 0
+    top = 0
+    drawn = 0
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+
+    def draw(lines: list) -> None:
+        nonlocal drawn
+        if drawn:
+            sys.stdout.write(f"\x1b[{drawn}F")      # back to the first line
+        sys.stdout.write(CLEAR_BELOW + "\n".join(lines) + "\n")
+        sys.stdout.flush()
+        drawn = len(lines)
+
+    try:
+        tty.setcbreak(fd)
+        sys.stdout.write(HIDE_CURSOR)
+        while True:
+            # Title, footer and two "more" lines take four rows.
+            visible = max(3, _height() - 5)
+            if cursor < top:
+                top = cursor
+            if cursor >= top + visible:
+                top = cursor - visible + 1
+            draw(_screen(title, choices, checked, cursor, top, visible))
+
+            key = _read_key(fd)
+            if key in UP:
+                cursor = (cursor - 1) % len(choices)
+            elif key in DOWN:
+                cursor = (cursor + 1) % len(choices)
+            elif key in TOGGLE:
+                checked[cursor] = not checked[cursor]
+            elif key in ALL:
+                checked = [not all(checked)] * len(choices)
+            elif key in CONFIRM:
+                break
+    except KeyboardInterrupt:
+        draw(_cancelled(title))
+        raise
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write(SHOW_CURSOR)
+        sys.stdout.flush()
+
+    picked = [c.name for c, on in zip(choices, checked) if on]
+    draw(_summary(title, picked))
+    return picked
+
+
+# --------------------------------------------------------------------------
+# Reading ~/42.yml
+# --------------------------------------------------------------------------
+
+ITEM_SECTIONS = ("caches", "tools", "repos")
+STEP_SECTIONS = ("login", "logout")
+SECTIONS = ("variables",) + ITEM_SECTIONS + STEP_SECTIONS
+
+#: Every item keyword, and the kind of value it takes.
+ITEM_KEYS = {
+    "source": "text",
+    "dest": "text",
+    "link": "text",
+    "setup": "list",
+    "path": "list",
+    "env": "variables",
+    "squash": "true/false",
+    "needs": "list",
+}
+
+#: Keywords an item must have, per section.
+REQUIRED_KEYS = {
+    "caches": ("dest", "link"),
+    "tools": ("dest", "setup"),
+    "repos": ("source", "dest"),
+}
+
+#: Keywords that mean nothing in a section, so writing one is a mistake.
+UNUSED_KEYS = {
+    "caches": ("source", "squash"),
+    "tools": ("squash",),
+    "repos": (),
+}
+
+#: Every step keyword, and the kind of value it takes.
+STEP_KEYS = {
+    "run": "list",
+    "do": "text",
+    "ignore_errors": "true/false",
+    "message": "text",
+    "choose": "true/false",
+    "options": "list",
+}
+
+ACTIONS = ("install", "link", "clone", "push", "unlink")
+
+#: The `do` actions that set up the items of one section; `choose` picks among them.
+ACTION_SECTIONS = {"install": "tools", "link": "caches", "clone": "repos"}
+
+
+class _Loader(yaml.SafeLoader):
+    """A SafeLoader that refuses a key written twice in the same map.
+
+    Plain PyYAML silently keeps the last one, so a second `flutter:` would
+    quietly replace the first.
+    """
+
+
+def _map_without_duplicates(loader: _Loader, node: yaml.MappingNode) -> dict:
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"{key!r} is written twice", key_node.start_mark)
+        seen.add(key)
+    return loader.construct_mapping(node, deep=True)
+
+
+_Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+                        _map_without_duplicates)
+
+
+def _is_name(text: object) -> bool:
+    """Whether `text` can be a shell variable name."""
+    return (isinstance(text, str) and text != ""
+            and (text[0].isalpha() or text[0] == "_")
+            and all(c.isalnum() or c == "_" for c in text)
+            and text.isascii())
+
+
+def _is_value(value: object) -> bool:
+    """Text or a whole number.
+
+    true/false is refused because Python would write it as True, and decimals
+    because YAML reads a version like 3.10 as the number 3.1.
+    """
+    return isinstance(value, (str, int)) and not isinstance(value, bool)
+
+
+def _type_problem(where: str, value: object, kind: str) -> list:
+    """An empty list when `value` is of `kind`, else one problem."""
+    if kind == "text" and isinstance(value, str):
+        return []
+    if kind == "true/false" and isinstance(value, bool):
+        return []
+    if kind == "list" and isinstance(value, list) \
+            and all(isinstance(entry, str) for entry in value):
+        return []
+    if kind == "variables" and isinstance(value, dict):
+        return _variables_problems(where, value)
+    return [f"{where} must be {_KIND_NAMES[kind]}"]
+
+
+_KIND_NAMES = {
+    "text": "text",
+    "true/false": "true or false",
+    "list": "a list of text",
+    "variables": "a map of NAME: value",
+}
+
+
+#: Variables 42 relies on or sets itself, so ~/42.yml must not define them.
+#: PATH is extended with the `path` keyword instead.
+RESERVED_NAMES = ("PATH", "HOME", "USER", "SOURCE", "DEST", "CHOSEN", "SKIPPED")
+
+
+def _variables_problems(where: str, variables: dict) -> list:
+    problems = []
+    for name, value in variables.items():
+        if not _is_name(name):
+            problems.append(f"{where}: {name!r} is not a valid variable name")
+        elif name in RESERVED_NAMES:
+            problems.append(f"{where}: {name} is set by 42 itself, pick another name")
+        elif not _is_value(value):
+            problems.append(f"{where}.{name} must be text or a whole number "
+                            "(put quotes around yes, no, true, false and "
+                            "versions like 3.10)")
+    return problems
+
+
+def _item_problems(section: str, name: str, item: object) -> list:
+    where = f"{section}.{name}"
+    if not isinstance(item, dict):
+        return [f"{where} must be a map of keywords"]
+
+    problems = []
+    for key, value in item.items():
+        if key not in ITEM_KEYS:
+            problems.append(f"{where}: unknown keyword {key!r}")
+        elif key in UNUSED_KEYS[section]:
+            problems.append(f"{where}: {key!r} is not used by {section}")
+        else:
+            problems += _type_problem(f"{where}.{key}", value, ITEM_KEYS[key])
+    for key in REQUIRED_KEYS[section]:
+        if key not in item:
+            problems.append(f"{where}: missing {key!r}")
+    return problems
+
+
+def _step_problems(section: str, name: str, step: object) -> list:
+    where = f"{section}.{name}"
+    if not isinstance(step, dict):
+        return [f"{where} must be a map of keywords"]
+
+    problems = []
+    for key, value in step.items():
+        if key not in STEP_KEYS:
+            problems.append(f"{where}: unknown keyword {key!r}")
+        else:
+            problems += _type_problem(f"{where}.{key}", value, STEP_KEYS[key])
+    if problems:
+        return problems
+
+    action = step.get("do")
+    if ("run" in step) == ("do" in step):
+        problems.append(f"{where} needs exactly one of 'run' or 'do'")
+    if action is not None and action not in ACTIONS:
+        problems.append(f"{where}.do must be one of: {', '.join(ACTIONS)}")
+    if "message" in step and action != "push":
+        problems.append(f"{where}: 'message' only goes with 'do: push'")
+    if action == "push" and "message" not in step:
+        problems.append(f"{where}: 'do: push' needs a 'message' for its commits")
+    if step.get("choose") and action is not None and action not in ACTION_SECTIONS:
+        problems.append(f"{where}: 'choose' only goes with "
+                        f"'do: {', '.join(ACTION_SECTIONS)}' or with 'run'")
+    if step.get("choose") and "run" in step and "options" not in step:
+        problems.append(f"{where}: 'choose' on a 'run' step needs 'options'")
+    if "options" in step and not ("run" in step and step.get("choose")):
+        problems.append(f"{where}: 'options' only goes with 'run' and 'choose: true'")
+    return problems
+
+
+def _needs_cycle(items: dict) -> list:
+    """A chain of `needs` that leads back to where it started, or []."""
+    def follow(name: str, chain: list) -> list:
+        if name in chain:
+            return chain[chain.index(name):] + [name]
+        for need in items[name].get("needs", []):
+            if need in items:
+                cycle = follow(need, chain + [name])
+                if cycle:
+                    return cycle
+        return []
+
+    for name in items:
+        cycle = follow(name, [])
+        if cycle:
+            return cycle
+    return []
+
+
+def items_of(config: dict) -> dict:
+    """Every item of caches, tools and repos by name, in file order."""
+    return {name: item for section in ITEM_SECTIONS
+            for name, item in config[section].items()}
+
+
+def section_of(config: dict, name: str) -> str:
+    """Which of caches, tools and repos holds the item `name`."""
+    return next(section for section in ITEM_SECTIONS if name in config[section])
+
+
+def check(config: object) -> list:
+    """Every problem in a loaded config, as readable lines. Empty means fine."""
+    if not isinstance(config, dict):
+        return ["the file must be a map of sections (variables, caches, tools, ...)"]
+
+    problems = []
+    for section in config:
+        if section not in SECTIONS:
+            problems.append(f"unknown section {section!r} "
+                            f"(known: {', '.join(SECTIONS)})")
+    if problems:
+        return problems
+
+    for section in SECTIONS:
+        if not isinstance(config[section], dict):
+            problems.append(f"{section} must be a map")
+    if problems:
+        return problems
+
+    problems += _variables_problems("variables", config["variables"])
+
+    for section in ITEM_SECTIONS + STEP_SECTIONS:
+        for name in config[section]:
+            if not isinstance(name, str):
+                problems.append(f"{section}: the name {name!r} must be text "
+                                "(put quotes around it)")
+    if problems:
+        return problems
+
+    items = {}
+    for section in ITEM_SECTIONS:
+        for name, item in config[section].items():
+            problems += _item_problems(section, name, item)
+            if name in items:
+                problems.append(f"{section}.{name}: the name {name!r} is already "
+                                f"used in {items[name]}")
+            items[name] = section
+    for section in STEP_SECTIONS:
+        for name, step in config[section].items():
+            problems += _step_problems(section, name, step)
+    if problems:
+        return problems
+
+    all_items = items_of(config)
+    for name, item in all_items.items():
+        for need in item.get("needs", []):
+            if need not in all_items:
+                problems.append(f"{items[name]}.{name}.needs: {need!r} is not "
+                                "an item in caches, tools or repos")
+    if problems:
+        return problems
+
+    cycle = _needs_cycle(all_items)
+    if cycle:
+        problems.append("needs go in a circle: " + " → ".join(cycle))
+    return problems
+
+
+def load() -> dict:
+    """Read and check ~/42.yml. Missing sections become empty maps."""
+    if not CONFIG_FILE.exists():
+        shutil.copyfile(EXAMPLE_FILE, CONFIG_FILE)
+        # stderr, because `eval "$(42 env)"` runs whatever reaches stdout.
+        print(_line([("◇  ", GREEN), (f"created {CONFIG_FILE} from the example, "
+                                       "edit it to make it yours", WHITE)]),
+              file=sys.stderr)
+
+    try:
+        with CONFIG_FILE.open(encoding="utf-8") as handle:
+            config = yaml.load(handle, Loader=_Loader)
+    except yaml.YAMLError as error:
+        fail(f"{CONFIG_FILE} is not valid YAML", str(error).splitlines(),
+             "fix it and run 42 again")
+    except OSError as error:
+        fail(f"cannot read {CONFIG_FILE}", [str(error)], "fix it and run 42 again")
+
+    # A section written with nothing under it, like `repos:`, is empty.
+    if isinstance(config, dict):
+        for section in SECTIONS:
+            if config.get(section) is None:
+                config[section] = {}
+
+    problems = check(config)
+    if problems:
+        count = "1 problem" if len(problems) == 1 else f"{len(problems)} problems"
+        fail(f"{CONFIG_FILE} has {count}", problems, "fix it and run 42 again")
+    return config
+
+
+# --------------------------------------------------------------------------
+# Environment: variables, env and PATH
+# --------------------------------------------------------------------------
+
+class Problem(Exception):
+    """A value in ~/42.yml that cannot be used. The message says where."""
+
+
+def expand(text: str, where: str) -> str:
+    """Replace every $NAME in `text` with its value.
+
+    A name that has no value is an error, never an empty string: an empty
+    $GOINFRE in a path would point it somewhere else entirely.
+    """
+    result = os.path.expandvars(text)
+    if "$" in result:
+        raise Problem(f"{where}: {text!r} uses a variable that is not defined")
+    return result
+
+
+def expand_path(text: str, where: str) -> Path:
+    """Expand a path and make sure it is absolute."""
+    path = expand(text, where)
+    if not path.startswith("/"):
+        raise Problem(f"{where}: {text!r} must be an absolute path "
+                      "(start it with / or a variable like $HOME)")
+    return Path(os.path.normpath(path))
+
+
+def source_of(name: str, item: dict) -> str:
+    """The item's `source` with its variables filled in, or "" when it has none."""
+    return expand(item["source"], f"{name}.source") if "source" in item else ""
+
+
+def dest_of(name: str, item: dict) -> Path:
+    return expand_path(item["dest"], f"{name}.dest")
+
+
+def link_of(name: str, item: dict) -> Path:
+    """The $HOME path of an item's `link`.
+
+    Linking replaces whatever is at that path, so it must be inside $HOME and
+    never $HOME itself.
+    """
+    link = expand_path(item["link"], f"{name}.link")
+    if Path.home() not in link.parents:
+        raise Problem(f"{name}.link: {item['link']!r} must be inside $HOME")
+    return link
+
+
+def paths_of(name: str, item: dict) -> list:
+    return [expand_path(entry, f"{name}.path") for entry in item.get("path", [])]
+
+
+def exported_names(config: dict) -> list:
+    """Names of every variable 42 sets: `variables`, then each item's `env`."""
+    names = list(config["variables"])
+    for item in items_of(config).values():
+        names += [name for name in item.get("env", {}) if name not in names]
+    return names
+
+
+def add_to_path(folders: list) -> None:
+    """Put the folders that exist at the front of PATH, once each, in order.
+
+    A folder already on PATH is moved to the front rather than skipped, so
+    42's tools come before anything a shell added earlier, like pyenv's
+    shims. Running it again changes nothing.
+    """
+    front = []
+    for folder in folders:
+        if folder.is_dir() and str(folder) not in front:
+            front.append(str(folder))
+    rest = [entry for entry in os.environ.get("PATH", "").split(":")
+            if entry not in front]
+    os.environ["PATH"] = ":".join(front + rest)
+
+
+def prepare(config: dict) -> None:
+    """Set every variable and env, check every path, and extend PATH.
+
+    Everything 42 runs afterwards inherits this environment.
+    """
+    problems = []
+    for name, value in config["variables"].items():
+        try:
+            os.environ[name] = expand(str(value), f"variables.{name}")
+        except Problem as problem:
+            problems.append(str(problem))
+    if problems:
+        fail(f"{CONFIG_FILE} has a problem in its variables", problems,
+             "fix it and run 42 again")
+
+    folders = []
+    links = {}
+    for name, item in items_of(config).items():
+        try:
+            for key, value in item.get("env", {}).items():
+                os.environ[key] = expand(str(value), f"{name}.env.{key}")
+            source_of(name, item)
+            dest = dest_of(name, item)
+            if "link" in item:
+                link = link_of(name, item)
+                # Linking deletes a real folder at the link, which must never
+                # take the dest with it, or the other way around.
+                if link == dest or link in dest.parents or dest in link.parents:
+                    raise Problem(f"{name}: link and dest must not be inside "
+                                  "each other")
+                if link in links:
+                    raise Problem(f"{name}.link: {link} is already the link "
+                                  f"of {links[link]}")
+                links[link] = name
+            folders += paths_of(name, item)
+        except Problem as problem:
+            problems.append(str(problem))
+    if problems:
+        fail(f"{CONFIG_FILE} has a problem in its items", problems,
+             "fix it and run 42 again")
+
+    add_to_path(folders)
+
+
+# --------------------------------------------------------------------------
+# Running steps
+# --------------------------------------------------------------------------
+
+#: Whether pickers are shown. Off with --all, and when there is no terminal
+#: to answer them or to draw on (in that case everything is picked).
+ASK = sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def run_lines(lines: list, cwd: Path = None, extra: dict = None) -> bool:
+    """Run `lines` as one bash script, its output going straight to the terminal.
+
+    -e stops at the first failing line, -u makes an undefined $NAME an error
+    instead of an empty string, and pipefail makes `a | b` fail when `a` fails.
+    """
+    environment = dict(os.environ, **(extra or {}))
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c", "\n".join(lines)],
+                            cwd=cwd, env=environment)
+    return result.returncode == 0
+
+
+def output_of(lines: list) -> list:
+    """Run `lines` like run_lines and return their output lines, or None on failure.
+
+    Empty lines and repeats are dropped; the order is kept.
+    """
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c", "\n".join(lines)],
+                            stdout=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        return None
+    return list(dict.fromkeys(line.strip() for line in result.stdout.splitlines()
+                              if line.strip()))
+
+
+def pick(title: str, choices: list) -> list:
+    """The names picked in a checkbox prompt, or all of them when not asking."""
+    if ASK:
+        return choose(title, choices)
+    picked = [choice.name for choice in choices]
+    for line in _summary(title, picked):
+        print(line)
+    return picked
+
+
+def heading(name: str) -> None:
+    print(_line([("◆  ", CYAN), (name, BOLD + CYAN)]))
+
+
+def result(name: str, ok: bool, ignored: bool = False) -> None:
+    if ok:
+        print(_line([("│  ", GRAY), ("✔ ", GREEN), (name, GREEN)], cut=False))
+    elif ignored:
+        print(_line([("│  ", GRAY), ("▲ ", YELLOW),
+                     (f"{name} failed, continuing", YELLOW)], cut=False))
+    else:
+        print(_line([("│  ", GRAY), ("✖ ", RED), (f"{name} failed", RED)], cut=False))
+    print(_line([("│", GRAY)]))
+
+
+def run_step(config: dict, name: str, step: dict) -> bool:
+    """Carry out one step of login or logout. True when it succeeded."""
+    if "do" in step:
+        return DO[step["do"]](config, name, step)
+
+    if not step.get("choose"):
+        heading(name)
+        return run_lines(step["run"])
+
+    options = output_of(step["options"])
+    if options is None:
+        heading(name)
+        print(_line([("│  ", GRAY), ("the options lines failed", RED)]))
+        return False
+    picked = pick(name, [Choice(option) for option in options])
+    skipped = [option for option in options if option not in picked]
+    return run_lines(step["run"], extra={"CHOSEN": "\n".join(picked),
+                                         "SKIPPED": "\n".join(skipped)})
+
+
+def run_steps(config: dict, section: str) -> int:
+    """Run the steps of login or logout in order. Returns the exit code.
+
+    A failed step stops everything after it, unless it has ignore_errors.
+    """
+    intro(section)
+    for name, step in config[section].items():
+        ok = run_step(config, name, step)
+        ignored = not ok and step.get("ignore_errors", False)
+        result(name, ok, ignored)
+        if not ok and not ignored:
+            outro(f"{section} stopped at {name}", RED)
+            return 1
+    outro(f"{section} done")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Items: setting up caches, tools and repos, with what they need
+# --------------------------------------------------------------------------
+
+#: Items handled during this run, and whether they ended up ready. Shared by
+#: every step, so a tool needed by two others is set up once.
+DONE = {}
+
+
+def note(symbol: str, style: str, name: str, text: str) -> None:
+    """One line about one item, under the current step."""
+    print(_line([("│  ", GRAY), (symbol + " ", style), (name, style),
+                 ("  " + text, GRAY)], cut=False))
+
+
+def _allow_and_retry(function, path: str, _error) -> None:
+    """rmtree's error handler: make the folder writable, then try again.
+
+    Some tools (Go's module cache, some npm packages) leave read-only
+    folders, and nothing can be deleted from a read-only folder.
+    """
+    os.chmod(os.path.dirname(path), 0o700)
+    if os.path.isdir(path) and not os.path.islink(path):
+        os.chmod(path, 0o700)
+    function(path)
+
+
+def remove(path: Path) -> None:
+    """Delete a file, a symlink or a whole folder. Nothing there is fine."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path, onerror=_allow_and_retry)
+
+
+def setup_environment(name: str, item: dict, dest: Path) -> dict:
+    """What an item's setup gets besides 42's variables: $SOURCE, $DEST, and
+    the item's own `path` folders at the front of PATH.
+
+    Those folders do not exist yet when setup starts, but setup may create
+    them and use them on its next line, like android's setup running the
+    sdkmanager it has just unpacked.
+    """
+    folders = [str(folder) for folder in paths_of(name, item)]
+    return {"SOURCE": source_of(name, item), "DEST": str(dest),
+            "PATH": ":".join(folders + [os.environ.get("PATH", "")])}
+
+
+def install_tool(config: dict, name: str, item: dict) -> bool:
+    """Run a tool's setup if its dest does not exist yet.
+
+    setup runs in a temporary folder next to dest, with $SOURCE and $DEST
+    set, and must create dest. If it fails, or is interrupted, whatever it
+    made of dest is removed so the next run starts over.
+    """
+    dest = dest_of(name, item)
+    if dest.exists():
+        note("·", GRAY, name, "already installed")
+        return True
+
+    note("●", CYAN, name, "installing")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=f".{name}-", dir=dest.parent))
+    ok = False
+    try:
+        ok = run_lines(item["setup"], cwd=work,
+                       extra=setup_environment(name, item, dest))
+        if ok and not dest.exists():
+            note("✖", RED, name, f"setup finished but did not create {dest}")
+            return False
+    finally:
+        remove(work)
+        if not ok:
+            remove(dest)
+
+    if ok:
+        note("✔", GREEN, name, "installed")
+    else:
+        note("✖", RED, name, "setup failed")
+    return ok
+
+
+def create_cache(config: dict, name: str, item: dict) -> bool:
+    """Create a cache's dest. Its setup, if any, runs inside it once, right after."""
+    dest = dest_of(name, item)
+    if dest.exists():
+        return True
+
+    dest.mkdir(parents=True)
+    if "setup" not in item:
+        return True
+
+    ok = False
+    try:
+        ok = run_lines(item["setup"], cwd=dest,
+                       extra=setup_environment(name, item, dest))
+    finally:
+        if not ok:
+            remove(dest)
+    if not ok:
+        note("✖", RED, name, "setup failed")
+    return ok
+
+
+def short(path: Path) -> str:
+    """A $HOME path written with ~, as people read it."""
+    return "~" + str(path)[len(str(Path.home())):] if Path.home() in path.parents \
+        else str(path)
+
+
+def is_linked(link: Path, dest: Path) -> bool:
+    """Whether `link` is a symlink that leads to `dest`."""
+    return link.is_symlink() and os.path.realpath(link) == os.path.realpath(dest)
+
+
+def make_link(name: str, item: dict) -> bool:
+    """Make the item's link a symlink to its dest.
+
+    A wrong or broken symlink is replaced. A real folder or file is deleted:
+    its contents are not kept anywhere, so only link what can be lost or
+    restored (caches, and repos after they are cloned).
+    """
+    link = link_of(name, item)
+    dest = dest_of(name, item)
+    shown = short(link)
+
+    if is_linked(link, dest):
+        note("·", GRAY, name, f"{shown} already linked")
+        return True
+
+    replaced = ""
+    if link.is_symlink():
+        link.unlink()
+    elif link.exists():
+        remove(link)
+        replaced = " (replaced the real folder)"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(dest)
+    note("✔", GREEN, name, f"{shown} → {dest}{replaced}")
+    return True
+
+
+def remove_link(name: str, item: dict) -> None:
+    """Remove the item's link, but only if it is our symlink to its dest."""
+    link = link_of(name, item)
+    if is_linked(link, dest_of(name, item)):
+        link.unlink()
+        note("✔", GREEN, name, f"{short(link)} unlinked")
+    elif link.is_symlink() or link.exists():
+        note("·", GRAY, name, f"{short(link)} is not our symlink, left alone")
+
+
+def git(args: list, repo: Path = None, show: bool = False) -> subprocess.CompletedProcess:
+    """Run git, in `repo` when given. Its output is captured unless `show`."""
+    command = ["git"] + (["-C", str(repo)] if repo else []) + args
+    if show:
+        return subprocess.run(command, text=True)
+    return subprocess.run(command, capture_output=True, text=True)
+
+
+def git_lines(args: list, repo: Path) -> list:
+    """The output lines of a git command that only reads."""
+    return [line for line in git(args, repo).stdout.splitlines() if line]
+
+
+def last_error(completed: subprocess.CompletedProcess) -> str:
+    lines = completed.stderr.strip().splitlines()
+    return lines[-1] if lines else f"exit code {completed.returncode}"
+
+
+def sync_branches(name: str, repo: Path) -> None:
+    """Give every branch on origin a local branch, fast-forwarded to origin's.
+
+    A branch with local commits that origin does not have is left alone and
+    reported: updating it would need a merge, which is your call.
+    """
+    remote = [branch for branch in git_lines(
+        ["for-each-ref", "--format=%(refname:strip=3)", "refs/remotes/origin"], repo)
+        if branch != "HEAD"]
+    local = git_lines(["for-each-ref", "--format=%(refname:short)", "refs/heads"], repo)
+    current = git(["symbolic-ref", "--quiet", "--short", "HEAD"], repo).stdout.strip()
+
+    for branch in remote:
+        if branch not in local:
+            done = git(["branch", "--quiet", "--track", branch, f"origin/{branch}"], repo)
+        elif branch == current:
+            done = git(["merge", "--quiet", "--ff-only", f"origin/{branch}"], repo)
+        else:
+            done = git(["fetch", "--quiet", ".", f"origin/{branch}:{branch}"], repo)
+        if done.returncode != 0:
+            note("▲", YELLOW, name, f"branch {branch} not updated: {last_error(done)}")
+
+
+def clone_repo(config: dict, name: str, item: dict) -> bool:
+    """Clone a repo, or bring an existing clone up to date.
+
+    A fresh clone gets a local branch for every branch on origin, then its
+    setup runs inside it. If cloning or setup fails, the clone is removed so
+    the next login tries again. A squash repo is cloned with only its last
+    commit and is not updated afterwards: its history is replaced at logout.
+    """
+    dest = dest_of(name, item)
+
+    if (dest / ".git").exists():
+        if item.get("squash"):
+            note("·", GRAY, name, "already cloned")
+            return True
+        fetched = git(["fetch", "--quiet", "--all", "--prune"], dest)
+        if fetched.returncode != 0:
+            note("✖", RED, name, f"fetch failed: {last_error(fetched)}")
+            return False
+        sync_branches(name, dest)
+        note("✔", GREEN, name, "up to date with origin")
+        return True
+
+    if dest.exists():
+        note("✖", RED, name, f"{dest} exists but is not a git repo; move it away first")
+        return False
+
+    note("●", CYAN, name, "cloning")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    depth = ["--depth", "1"] if item.get("squash") else []
+    ok = False
+    try:
+        cloned = git(["clone", *depth, source_of(name, item), str(dest)], show=True)
+        if cloned.returncode != 0:
+            note("✖", RED, name, "clone failed")
+            return False
+        if not item.get("squash"):
+            sync_branches(name, dest)
+        ok = "setup" not in item or run_lines(
+            item["setup"], cwd=dest,
+            extra=setup_environment(name, item, dest))
+        if not ok:
+            note("✖", RED, name, "setup failed")
+            return False
+    finally:
+        if not ok:
+            remove(dest)
+
+    note("✔", GREEN, name, "cloned")
+    # After the cleanup above on purpose: a failed clone or setup removes
+    # dest, which must never take a folder adopted from $HOME with it.
+    if not git_lines(["for-each-ref", "refs/remotes/origin"], dest):
+        return start_empty_repo(name, item, dest)
+    return True
+
+
+#: The branch a brand-new, empty repo starts on, as GitHub names it.
+NEW_REPO_BRANCH = "main"
+
+
+def has_commits(repo: Path) -> bool:
+    return git(["rev-parse", "--quiet", "--verify", "HEAD"], repo).returncode == 0
+
+
+def start_empty_repo(name: str, item: dict, repo: Path) -> bool:
+    """Prepare the clone of a repo that has no branches on origin yet.
+
+    Its branch is named main before anything is committed. If the item has a
+    link and a real folder is there, like an existing Chrome profile, that
+    folder's contents move into the repo: the first logout pushes them,
+    instead of the link deleting them.
+    """
+    git(["symbolic-ref", "HEAD", f"refs/heads/{NEW_REPO_BRANCH}"], repo)
+    if "link" not in item:
+        return True
+
+    link = link_of(name, item)
+    if link.is_symlink() or not link.is_dir():
+        return True
+    if (link / ".git").exists():
+        note("✖", RED, name, f"{short(link)} is a git repo itself; move it away first")
+        return False
+
+    for entry in sorted(link.iterdir()):
+        shutil.move(str(entry), str(repo / entry.name))
+    note("✔", GREEN, name, f"the new repo took in everything from {short(link)}")
+    return True
+
+
+#: Files git keeps while a merge, rebase, cherry-pick or revert is half done.
+UNFINISHED = ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD",
+              "REVERT_HEAD")
+
+
+def why_not_pushable(repo: Path) -> str:
+    """Why committing everything in `repo` would be wrong, or "" when it is safe."""
+    if git(["symbolic-ref", "--quiet", "HEAD"], repo).returncode != 0:
+        return "HEAD is detached; check out a branch first"
+    for marker in UNFINISHED:
+        path = git(["rev-parse", "--git-path", marker], repo).stdout.strip()
+        if (repo / path).exists():
+            return "a merge or rebase is not finished; finish or abort it first"
+    if git_lines(["stash", "list"], repo):
+        return "it has stashes, which cannot be pushed; apply or drop them first"
+    return ""
+
+
+def commit_everything(repo: Path, message: str) -> subprocess.CompletedProcess:
+    """`git add -A`, then commit if that staged anything."""
+    added = git(["add", "-A"], repo)
+    if added.returncode != 0:
+        return added
+    if git(["diff", "--cached", "--quiet"], repo).returncode == 0:
+        return added
+    return git(["commit", "--quiet", "-m", message], repo)
+
+
+def push_repo(name: str, item: dict, message: str) -> bool:
+    """Commit every change and push every branch and tag. True when origin has it all.
+
+    Branches that are only behind origin are fast-forwarded first, so that a
+    branch someone else pushed to does not block the push. A real conflict
+    stops here, with the repo left as it was.
+    """
+    repo = dest_of(name, item)
+    if not (repo / ".git").exists():
+        note("·", GRAY, name, "not cloned on this machine")
+        return True
+
+    problem = why_not_pushable(repo)
+    if problem:
+        note("✖", RED, name, problem)
+        return False
+
+    committed = commit_everything(repo, message)
+    if committed.returncode != 0:
+        note("✖", RED, name, f"commit failed: {last_error(committed)}")
+        return False
+
+    fetched = git(["fetch", "--quiet", "--all", "--prune"], repo)
+    if fetched.returncode != 0:
+        note("✖", RED, name, f"fetch failed: {last_error(fetched)}")
+        return False
+
+    if git(["rev-parse", "--quiet", "--verify", "@{upstream}"], repo).returncode == 0:
+        rebased = git(["rebase", "--quiet", "@{upstream}"], repo)
+        if rebased.returncode != 0:
+            git(["rebase", "--abort"], repo)
+            note("✖", RED, name, "your commits conflict with origin's; the rebase "
+                                 "was undone, merge them by hand")
+            return False
+
+    sync_branches(name, repo)
+
+    for push in (["push", "--quiet", "--all", "-u", "origin"],
+                 ["push", "--quiet", "--tags", "origin"]):
+        pushed = git(push, repo)
+        if pushed.returncode != 0:
+            note("✖", RED, name, f"push failed: {last_error(pushed)}")
+            return False
+
+    note("✔", GREEN, name, "pushed")
+    return True
+
+
+def push_squashed(name: str, item: dict, message: str) -> bool:
+    """Replace a squash repo's history with one commit of its current files,
+    and force-push it."""
+    repo = dest_of(name, item)
+    if not (repo / ".git").exists():
+        note("·", GRAY, name, "not cloned on this machine")
+        return True
+
+    branch = git(["symbolic-ref", "--quiet", "--short", "HEAD"], repo).stdout.strip()
+    if not branch:
+        note("✖", RED, name, "HEAD is detached; check out a branch first")
+        return False
+
+    # A new repo has no history to replace: its first commit is already alone.
+    start_over = [["checkout", "--quiet", "--orphan", "42-squash"]] if has_commits(repo) else []
+    for command in (*start_over,
+                    ["add", "-A"],
+                    ["commit", "--quiet", "--allow-empty", "-m", message],
+                    ["branch", "--quiet", "-M", branch],
+                    ["push", "--quiet", "--force", "origin", branch]):
+        done = git(command, repo)
+        if done.returncode != 0:
+            note("✖", RED, name, f"git {command[0]} failed: {last_error(done)}")
+            return False
+
+    note("✔", GREEN, name, "pushed as a single commit")
+    return True
+
+
+def unlisted_repos(config: dict) -> list:
+    """Git repos next to your repos that ~/42.yml does not list.
+
+    They are looked for in the folders that hold your repos (like
+    $WORKSPACE), because a repo cloned there by hand would otherwise be
+    wiped at logout without anyone noticing.
+    """
+    listed = {dest_of(name, item) for name, item in config["repos"].items()}
+    found = []
+    for folder in sorted({dest.parent for dest in listed}):
+        if not folder.is_dir():
+            continue
+        for child in sorted(folder.iterdir()):
+            if (child / ".git").exists() and child not in listed:
+                found.append(child)
+    return found
+
+
+#: How each section sets up one of its items.
+SET_UP = {
+    "tools": install_tool,
+    "caches": create_cache,
+    "repos": clone_repo,
+}
+
+
+def set_up(config: dict, name: str) -> bool:
+    """Set up one item, after everything it needs. True when it is ready.
+
+    Its `path` folders go on PATH right away, so the items after it can use
+    what it installed.
+    """
+    if name in DONE:
+        return DONE[name]
+
+    item = items_of(config)[name]
+    for need in item.get("needs", []):
+        if not set_up(config, need):
+            note("✖", RED, name, f"skipped: needs {need}")
+            DONE[name] = False
+            return False
+
+    section = section_of(config, name)
+    try:
+        ok = SET_UP[section](config, name, item)
+        if ok and "link" in item:
+            ok = make_link(name, item)
+    except OSError as error:
+        note("✖", RED, name, str(error))
+        ok = False
+    if ok:
+        add_to_path(paths_of(name, item))
+    DONE[name] = ok
+    return ok
+
+
+def ready_tag(config: dict, name: str, item: dict) -> str:
+    """What the picker shows in green next to an item that needs no work."""
+    section = section_of(config, name)
+    if section == "tools" and dest_of(name, item).exists():
+        return "installed"
+    if section == "caches" and is_linked(link_of(name, item), dest_of(name, item)):
+        return "linked"
+    if section == "repos" and (dest_of(name, item) / ".git").exists():
+        return "cloned"
+    return ""
+
+
+def choices_for(config: dict, section: str) -> list:
+    return [Choice(name, item["dest"], item.get("needs", []),
+                   ready_tag(config, name, item))
+            for name, item in config[section].items()]
+
+
+def set_up_all(config: dict, names: list) -> bool:
+    """Set up each item in `names`. Every one is tried, even after a failure."""
+    results = [set_up(config, name) for name in names]
+    return all(results)
+
+
+def do_set_up(config: dict, name: str, step: dict) -> bool:
+    """`do: install`, `do: link` and `do: clone`: set up the items of one
+    section (tools, caches or repos), all of them or the ones picked."""
+    section = ACTION_SECTIONS[step["do"]]
+    if step.get("choose"):
+        names = pick(name, choices_for(config, section))
+    else:
+        heading(name)
+        names = list(config[section])
+    return set_up_all(config, names)
+
+
+def do_push(config: dict, name: str, step: dict) -> bool:
+    """`do: push`: every repo on this machine. All are tried; any failure fails the step."""
+    heading(name)
+    results = []
+    for repo_name, item in config["repos"].items():
+        push = push_squashed if item.get("squash") else push_repo
+        try:
+            results.append(push(repo_name, item, step["message"]))
+        except OSError as error:
+            note("✖", RED, repo_name, str(error))
+            results.append(False)
+
+    for repo in unlisted_repos(config):
+        note("▲", YELLOW, short(repo),
+             "is a git repo that ~/42.yml does not list: it is not pushed")
+    return all(results)
+
+
+def do_unlink(config: dict, name: str, step: dict) -> bool:
+    """`do: unlink`: remove every link 42 made, from caches, tools and repos."""
+    heading(name)
+    ok = True
+    for item_name, item in items_of(config).items():
+        if "link" not in item:
+            continue
+        try:
+            remove_link(item_name, item)
+        except OSError as error:
+            note("✖", RED, item_name, str(error))
+            ok = False
+    return ok
+
+
+#: What each `do:` keyword runs.
+DO = {
+    "install": do_set_up,
+    "link": do_set_up,
+    "clone": do_set_up,
+    "push": do_push,
+    "unlink": do_unlink,
+}
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+def cmd_login(config: dict, args: list) -> int:
+    global ASK
+    if any(arg != "--all" for arg in args):
+        fail("42 login only takes --all", [], "run 42 to see the commands")
+    if "--all" in args:
+        ASK = False
+    return run_steps(config, "login")
+
+
+def cmd_logout(config: dict, args: list) -> int:
+    if args:
+        fail("42 logout takes no arguments", [], "run 42 to see the commands")
+    return run_steps(config, "logout")
+
+
+def cmd_env(config: dict, args: list) -> int:
+    """Print `export` lines for the shell to evaluate.
+
+    Only exports reach stdout. Running it twice gives the same PATH, because
+    a folder already on PATH is never added again.
+    """
+    if args:
+        fail("42 env takes no arguments", [], "run: eval \"$(42 env)\"")
+    for name in exported_names(config) + ["PATH"]:
+        print(f"export {name}={shlex.quote(os.environ.get(name, ''))}")
+    return 0
+
+USAGE = [
+    ("42 login [--all]", "pick and set up this session's caches, tools and repos"),
+    ("42 logout", "push your repos, then clean goinfre"),
+    ("42 install [tool...]", "install tools, and what they need"),
+    ("42 env", "print the exports that ~/.zshrc evaluates"),
+]
+
+
+def show_help(config: dict) -> None:
+    intro("session runner for /goinfre")
+    width = max(len(usage) for usage, _ in USAGE) + 3
+    for usage, meaning in USAGE:
+        print(_line([("│  ", GRAY), (usage.ljust(width), WHITE), (meaning, GRAY)], cut=False))
+    print(_line([("│", GRAY)], cut=False))
+    tools = ", ".join(config["tools"]) or "none yet"
+    print(_line([("│  ", GRAY), ("tools".ljust(width), WHITE), (tools, GRAY)], cut=False))
+    print(_line([("└  ", GRAY), ("config".ljust(width), WHITE),
+                 (str(CONFIG_FILE), GRAY)], cut=False))
+
+
+def cmd_install(config: dict, args: list) -> int:
+    """`42 install name...` installs those tools; without names, it asks."""
+    global ASK
+    if "--all" in args:
+        ASK = False
+    names = [arg for arg in args if arg != "--all"]
+    unknown = [name for name in names if name not in config["tools"]]
+    if unknown:
+        fail("not a tool in ~/42.yml: " + ", ".join(unknown), [],
+             "tools: " + (", ".join(config["tools"]) or "none"))
+
+    intro("install")
+    if not names:
+        names = pick("tools", choices_for(config, "tools"))
+    else:
+        heading("tools")
+    if set_up_all(config, names):
+        outro("installed. For this terminal: eval \"$(42 env)\"")
+        return 0
+    outro("some tools failed", RED)
+    return 1
+
+
+COMMANDS = {
+    "login": cmd_login,
+    "logout": cmd_logout,
+    "install": cmd_install,
+    "env": cmd_env,
+}
+
+
+def main(args: list) -> int:
+    # Line by line, so 42's lines and the commands' output stay in order
+    # even when everything goes to a file or a pipe.
+    sys.stdout.reconfigure(line_buffering=True)
+
+    config = load()
+    prepare(config)
+    if not args or args[0] in ("help", "-h", "--help"):
+        show_help(config)
+        return 0
+    if args[0] not in COMMANDS:
+        fail(f"unknown command {args[0]!r}", [], "run 42 to see the commands")
+    try:
+        return COMMANDS[args[0]](config, args[1:])
+    except KeyboardInterrupt:
+        print()
+        outro("cancelled", RED)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

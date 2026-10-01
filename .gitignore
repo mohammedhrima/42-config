@@ -1,8 +1,6 @@
-# Per-user settings never belong in this public repository. The real file is
-# ~/42.toml; these patterns only stop a stray copy from being committed.
-42.toml
-.42-custom.sh
-*.local.sh
+# Personal settings never belong in this public repository. The real file is
+# ~/42.yml; this only stops a stray copy from being committed.
+42.yml
 .env
 
 # Python bytecode
